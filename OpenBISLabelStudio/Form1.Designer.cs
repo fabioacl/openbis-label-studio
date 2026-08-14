@@ -1,0 +1,371 @@
+namespace OpenBISLabelStudio
+{
+    partial class Form1
+    {
+        /// <summary>
+        ///  Required designer variable.
+        /// </summary>
+        private System.ComponentModel.IContainer components = null;
+
+        /// <summary>
+        ///  Clean up any resources being used.
+        /// </summary>
+        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null))
+            {
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        #region Windows Form Designer generated code
+
+        /// <summary>
+        ///  Required method for Designer support - do not modify
+        ///  the contents of this method with the code editor.
+        /// </summary>
+        private void InitializeComponent()
+        {
+            openbisTypeLabel = new Label();
+            openbisTypeComboBox = new ComboBox();
+            selectedOpenbisTypeLabel = new Label();
+            openbisObjectsComboBox = new ComboBox();
+            loadPrintTemplates = new Button();
+            btnPrintLabel = new Button();
+            smallBoxLabelGroupBox = new GroupBox();
+            smallBoxPrinterComboBox = new ComboBox();
+            smallBoxPrinterLabel = new Label();
+            smallBoxLabelCheckBox = new CheckBox();
+            smallBoxLabelPreview = new PictureBox();
+            magnetLabelGroupBox = new GroupBox();
+            magnetPrinterComboBox = new ComboBox();
+            magnetPrinterLabel = new Label();
+            magnetFreeTextBox = new TextBox();
+            magnetFreeTextLabel = new Label();
+            magnetLabelCheckBox = new CheckBox();
+            magnetLabelPreview = new PictureBox();
+            flaskLabelGroupBox = new GroupBox();
+            flaskPrinterComboBox = new ComboBox();
+            flaskPrinterLabel = new Label();
+            flaskFreeTextBox = new TextBox();
+            flaskFreeTextLabel = new Label();
+            flaskLabelCheckBox = new CheckBox();
+            flaskLabelPreview = new PictureBox();
+            smallBoxLabelGroupBox.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)smallBoxLabelPreview).BeginInit();
+            magnetLabelGroupBox.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)magnetLabelPreview).BeginInit();
+            flaskLabelGroupBox.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)flaskLabelPreview).BeginInit();
+            SuspendLayout();
+            // 
+            // openbisTypeLabel
+            // 
+            openbisTypeLabel.AutoSize = true;
+            openbisTypeLabel.Location = new Point(40, 25);
+            openbisTypeLabel.Name = "openbisTypeLabel";
+            openbisTypeLabel.Size = new Size(107, 20);
+            openbisTypeLabel.TabIndex = 0;
+            openbisTypeLabel.Text = "OpenBIS Type:";
+            // 
+            // openbisTypeComboBox
+            // 
+            openbisTypeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            openbisTypeComboBox.FormattingEnabled = true;
+            openbisTypeComboBox.Location = new Point(165, 22);
+            openbisTypeComboBox.Name = "openbisTypeComboBox";
+            openbisTypeComboBox.Size = new Size(875, 28);
+            openbisTypeComboBox.TabIndex = 1;
+            openbisTypeComboBox.SelectedIndexChanged += openbisTypeComboBox_SelectedIndexChanged;
+            // 
+            // selectedOpenbisTypeLabel
+            // 
+            selectedOpenbisTypeLabel.AutoSize = true;
+            selectedOpenbisTypeLabel.Location = new Point(40, 65);
+            selectedOpenbisTypeLabel.Name = "selectedOpenbisTypeLabel";
+            selectedOpenbisTypeLabel.Size = new Size(43, 20);
+            selectedOpenbisTypeLabel.TabIndex = 2;
+            selectedOpenbisTypeLabel.Text = "Type:";
+            // 
+            // openbisObjectsComboBox
+            // 
+            openbisObjectsComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            openbisObjectsComboBox.FormattingEnabled = true;
+            openbisObjectsComboBox.Location = new Point(165, 62);
+            openbisObjectsComboBox.Name = "openbisObjectsComboBox";
+            openbisObjectsComboBox.Size = new Size(875, 28);
+            openbisObjectsComboBox.TabIndex = 3;
+            // 
+            // loadPrintTemplates
+            // 
+            loadPrintTemplates.Location = new Point(330, 460);
+            loadPrintTemplates.Name = "loadPrintTemplates";
+            loadPrintTemplates.Size = new Size(190, 48);
+            loadPrintTemplates.TabIndex = 4;
+            loadPrintTemplates.Text = "Load Templates";
+            loadPrintTemplates.UseVisualStyleBackColor = true;
+            loadPrintTemplates.Click += loadPrintTemplates_Click;
+            // 
+            // btnPrintLabel
+            // 
+            btnPrintLabel.Location = new Point(560, 460);
+            btnPrintLabel.Name = "btnPrintLabel";
+            btnPrintLabel.Size = new Size(190, 48);
+            btnPrintLabel.TabIndex = 5;
+            btnPrintLabel.Text = "Print Labels";
+            btnPrintLabel.UseVisualStyleBackColor = true;
+            btnPrintLabel.Click += btnPrintLabel_Click_1;
+            // 
+            // smallBoxLabelGroupBox
+            // 
+            smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterComboBox);
+            smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterLabel);
+            smallBoxLabelGroupBox.Controls.Add(smallBoxLabelCheckBox);
+            smallBoxLabelGroupBox.Controls.Add(smallBoxLabelPreview);
+            smallBoxLabelGroupBox.Location = new Point(40, 110);
+            smallBoxLabelGroupBox.Name = "smallBoxLabelGroupBox";
+            smallBoxLabelGroupBox.Size = new Size(300, 330);
+            smallBoxLabelGroupBox.TabIndex = 6;
+            smallBoxLabelGroupBox.TabStop = false;
+            smallBoxLabelGroupBox.Text = "Small Box 12mm Label";
+            smallBoxLabelGroupBox.Enter += groupBox1_Enter;
+            // 
+            // smallBoxPrinterComboBox
+            // 
+            smallBoxPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            smallBoxPrinterComboBox.FormattingEnabled = true;
+            smallBoxPrinterComboBox.Location = new Point(15, 275);
+            smallBoxPrinterComboBox.Name = "smallBoxPrinterComboBox";
+            smallBoxPrinterComboBox.Size = new Size(270, 28);
+            smallBoxPrinterComboBox.TabIndex = 3;
+            // 
+            // smallBoxPrinterLabel
+            // 
+            smallBoxPrinterLabel.AutoSize = true;
+            smallBoxPrinterLabel.Location = new Point(15, 250);
+            smallBoxPrinterLabel.Name = "smallBoxPrinterLabel";
+            smallBoxPrinterLabel.Size = new Size(55, 20);
+            smallBoxPrinterLabel.TabIndex = 2;
+            smallBoxPrinterLabel.Text = "Printer:";
+            // 
+            // smallBoxLabelCheckBox
+            // 
+            smallBoxLabelCheckBox.AutoSize = true;
+            smallBoxLabelCheckBox.Location = new Point(270, 15);
+            smallBoxLabelCheckBox.Name = "smallBoxLabelCheckBox";
+            smallBoxLabelCheckBox.Size = new Size(15, 14);
+            smallBoxLabelCheckBox.TabIndex = 1;
+            smallBoxLabelCheckBox.UseVisualStyleBackColor = true;
+            // 
+            // smallBoxLabelPreview
+            // 
+            smallBoxLabelPreview.BorderStyle = BorderStyle.FixedSingle;
+            smallBoxLabelPreview.Location = new Point(15, 45);
+            smallBoxLabelPreview.Name = "smallBoxLabelPreview";
+            smallBoxLabelPreview.Size = new Size(270, 110);
+            smallBoxLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
+            smallBoxLabelPreview.TabIndex = 0;
+            smallBoxLabelPreview.TabStop = false;
+            // 
+            // magnetLabelGroupBox
+            // 
+            magnetLabelGroupBox.Controls.Add(magnetPrinterComboBox);
+            magnetLabelGroupBox.Controls.Add(magnetPrinterLabel);
+            magnetLabelGroupBox.Controls.Add(magnetFreeTextBox);
+            magnetLabelGroupBox.Controls.Add(magnetFreeTextLabel);
+            magnetLabelGroupBox.Controls.Add(magnetLabelCheckBox);
+            magnetLabelGroupBox.Controls.Add(magnetLabelPreview);
+            magnetLabelGroupBox.Location = new Point(365, 110);
+            magnetLabelGroupBox.Name = "magnetLabelGroupBox";
+            magnetLabelGroupBox.Size = new Size(330, 330);
+            magnetLabelGroupBox.TabIndex = 7;
+            magnetLabelGroupBox.TabStop = false;
+            magnetLabelGroupBox.Text = "Magnet 12mm Label";
+            // 
+            // magnetPrinterComboBox
+            // 
+            magnetPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            magnetPrinterComboBox.FormattingEnabled = true;
+            magnetPrinterComboBox.Location = new Point(15, 275);
+            magnetPrinterComboBox.Name = "magnetPrinterComboBox";
+            magnetPrinterComboBox.Size = new Size(300, 28);
+            magnetPrinterComboBox.TabIndex = 5;
+            // 
+            // magnetPrinterLabel
+            // 
+            magnetPrinterLabel.AutoSize = true;
+            magnetPrinterLabel.Location = new Point(15, 250);
+            magnetPrinterLabel.Name = "magnetPrinterLabel";
+            magnetPrinterLabel.Size = new Size(55, 20);
+            magnetPrinterLabel.TabIndex = 4;
+            magnetPrinterLabel.Text = "Printer:";
+            // 
+            // magnetFreeTextBox
+            // 
+            magnetFreeTextBox.Location = new Point(15, 195);
+            magnetFreeTextBox.Name = "magnetFreeTextBox";
+            magnetFreeTextBox.Size = new Size(300, 27);
+            magnetFreeTextBox.TabIndex = 3;
+            magnetFreeTextBox.Leave += magnetFreeTextBox_Leave;
+            magnetFreeTextBox.KeyDown += magnetFreeTextBox_KeyDown;
+            // 
+            // magnetFreeTextLabel
+            // 
+            magnetFreeTextLabel.AutoSize = true;
+            magnetFreeTextLabel.Location = new Point(15, 170);
+            magnetFreeTextLabel.Name = "magnetFreeTextLabel";
+            magnetFreeTextLabel.Size = new Size(71, 20);
+            magnetFreeTextLabel.TabIndex = 2;
+            magnetFreeTextLabel.Text = "Free Text:";
+            // 
+            // magnetLabelCheckBox
+            // 
+            magnetLabelCheckBox.AutoSize = true;
+            magnetLabelCheckBox.Location = new Point(300, 15);
+            magnetLabelCheckBox.Name = "magnetLabelCheckBox";
+            magnetLabelCheckBox.Size = new Size(15, 14);
+            magnetLabelCheckBox.TabIndex = 1;
+            magnetLabelCheckBox.UseVisualStyleBackColor = true;
+            // 
+            // magnetLabelPreview
+            // 
+            magnetLabelPreview.BorderStyle = BorderStyle.FixedSingle;
+            magnetLabelPreview.Location = new Point(15, 45);
+            magnetLabelPreview.Name = "magnetLabelPreview";
+            magnetLabelPreview.Size = new Size(300, 110);
+            magnetLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
+            magnetLabelPreview.TabIndex = 0;
+            magnetLabelPreview.TabStop = false;
+            // 
+            // flaskLabelGroupBox
+            // 
+            flaskLabelGroupBox.Controls.Add(flaskPrinterComboBox);
+            flaskLabelGroupBox.Controls.Add(flaskPrinterLabel);
+            flaskLabelGroupBox.Controls.Add(flaskFreeTextBox);
+            flaskLabelGroupBox.Controls.Add(flaskFreeTextLabel);
+            flaskLabelGroupBox.Controls.Add(flaskLabelCheckBox);
+            flaskLabelGroupBox.Controls.Add(flaskLabelPreview);
+            flaskLabelGroupBox.Location = new Point(720, 110);
+            flaskLabelGroupBox.Name = "flaskLabelGroupBox";
+            flaskLabelGroupBox.Size = new Size(320, 330);
+            flaskLabelGroupBox.TabIndex = 8;
+            flaskLabelGroupBox.TabStop = false;
+            flaskLabelGroupBox.Text = "Flask 24mm Label";
+            // 
+            // flaskPrinterComboBox
+            // 
+            flaskPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            flaskPrinterComboBox.FormattingEnabled = true;
+            flaskPrinterComboBox.Location = new Point(15, 275);
+            flaskPrinterComboBox.Name = "flaskPrinterComboBox";
+            flaskPrinterComboBox.Size = new Size(290, 28);
+            flaskPrinterComboBox.TabIndex = 5;
+            // 
+            // flaskPrinterLabel
+            // 
+            flaskPrinterLabel.AutoSize = true;
+            flaskPrinterLabel.Location = new Point(15, 250);
+            flaskPrinterLabel.Name = "flaskPrinterLabel";
+            flaskPrinterLabel.Size = new Size(55, 20);
+            flaskPrinterLabel.TabIndex = 4;
+            flaskPrinterLabel.Text = "Printer:";
+            // 
+            // flaskFreeTextBox
+            // 
+            flaskFreeTextBox.Location = new Point(15, 195);
+            flaskFreeTextBox.Name = "flaskFreeTextBox";
+            flaskFreeTextBox.Size = new Size(290, 27);
+            flaskFreeTextBox.TabIndex = 3;
+            flaskFreeTextBox.Leave += flaskFreeTextBox_Leave;
+            flaskFreeTextBox.KeyDown += flaskFreeTextBox_KeyDown;
+            // 
+            // flaskFreeTextLabel
+            // 
+            flaskFreeTextLabel.AutoSize = true;
+            flaskFreeTextLabel.Location = new Point(15, 170);
+            flaskFreeTextLabel.Name = "flaskFreeTextLabel";
+            flaskFreeTextLabel.Size = new Size(71, 20);
+            flaskFreeTextLabel.TabIndex = 2;
+            flaskFreeTextLabel.Text = "Free Text:";
+            // 
+            // flaskLabelCheckBox
+            // 
+            flaskLabelCheckBox.AutoSize = true;
+            flaskLabelCheckBox.Location = new Point(290, 15);
+            flaskLabelCheckBox.Name = "flaskLabelCheckBox";
+            flaskLabelCheckBox.Size = new Size(15, 14);
+            flaskLabelCheckBox.TabIndex = 1;
+            flaskLabelCheckBox.UseVisualStyleBackColor = true;
+            // 
+            // flaskLabelPreview
+            // 
+            flaskLabelPreview.BorderStyle = BorderStyle.FixedSingle;
+            flaskLabelPreview.Location = new Point(15, 30);
+            flaskLabelPreview.Name = "flaskLabelPreview";
+            flaskLabelPreview.Size = new Size(290, 135);
+            flaskLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
+            flaskLabelPreview.TabIndex = 0;
+            flaskLabelPreview.TabStop = false;
+            // 
+            // Form1
+            // 
+            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleMode = AutoScaleMode.Font;
+            ClientSize = new Size(1080, 530);
+            Controls.Add(flaskLabelGroupBox);
+            Controls.Add(magnetLabelGroupBox);
+            Controls.Add(smallBoxLabelGroupBox);
+            Controls.Add(btnPrintLabel);
+            Controls.Add(loadPrintTemplates);
+            Controls.Add(openbisObjectsComboBox);
+            Controls.Add(selectedOpenbisTypeLabel);
+            Controls.Add(openbisTypeComboBox);
+            Controls.Add(openbisTypeLabel);
+            Font = new Font("Segoe UI", 11F, FontStyle.Regular, GraphicsUnit.Point);
+            Name = "Form1";
+            Text = "openBIS Label Studio";
+            Load += Form1_Load;
+            smallBoxLabelGroupBox.ResumeLayout(false);
+            smallBoxLabelGroupBox.PerformLayout();
+            ((System.ComponentModel.ISupportInitialize)smallBoxLabelPreview).EndInit();
+            magnetLabelGroupBox.ResumeLayout(false);
+            magnetLabelGroupBox.PerformLayout();
+            ((System.ComponentModel.ISupportInitialize)magnetLabelPreview).EndInit();
+            flaskLabelGroupBox.ResumeLayout(false);
+            flaskLabelGroupBox.PerformLayout();
+            ((System.ComponentModel.ISupportInitialize)flaskLabelPreview).EndInit();
+            ResumeLayout(false);
+            PerformLayout();
+        }
+
+        #endregion
+
+        private Label openbisTypeLabel;
+        private ComboBox openbisTypeComboBox;
+        private Label selectedOpenbisTypeLabel;
+        private ComboBox openbisObjectsComboBox;
+        private Button loadPrintTemplates;
+        private Button btnPrintLabel;
+        private GroupBox smallBoxLabelGroupBox;
+        private PictureBox smallBoxLabelPreview;
+        private CheckBox smallBoxLabelCheckBox;
+        private Label smallBoxPrinterLabel;
+        private ComboBox smallBoxPrinterComboBox;
+        private GroupBox magnetLabelGroupBox;
+        private PictureBox magnetLabelPreview;
+        private CheckBox magnetLabelCheckBox;
+        private Label magnetFreeTextLabel;
+        private TextBox magnetFreeTextBox;
+        private Label magnetPrinterLabel;
+        private ComboBox magnetPrinterComboBox;
+        private GroupBox flaskLabelGroupBox;
+        private PictureBox flaskLabelPreview;
+        private CheckBox flaskLabelCheckBox;
+        private Label flaskFreeTextLabel;
+        private TextBox flaskFreeTextBox;
+        private Label flaskPrinterLabel;
+        private ComboBox flaskPrinterComboBox;
+    }
+}

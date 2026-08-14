@@ -1,0 +1,36 @@
+# Sensitive Configuration & Token
+openbis_config.json
+**/openbis_config.json
+
+# Temporary / Generated results
+openbis_results.json
+**/openbis_results.json
+
+# Visual Studio & .NET Build Artifacts
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+.vs/
+*.user
+*.suo
+*.userprefs
+*.userosscache
+*.sln.docstates
+*.dll
+*.exe
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+venv/
+
+# Logs & OS Files
+*.log
+.DS_Store
+Thumbs.db
