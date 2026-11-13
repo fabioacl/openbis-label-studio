@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
-using OpenBISLabelStudio.Models;
-using OpenBISLabelStudio.Services;
-using ModelTypes = OpenBISLabelStudio.Models;
+using System.Windows.Forms;
 
 namespace OpenBISLabelStudio.Tests
 {
+    using OpenBISLabelStudio.Models;
+    using OpenBISLabelStudio.Services;
+    using ModelTypes = OpenBISLabelStudio.Models;
+
     internal static class Program
     {
         [STAThread]
@@ -24,7 +26,11 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(OpenBisClientSurfacesStderrWhenPythonFails), OpenBisClientSurfacesStderrWhenPythonFails),
                 (nameof(OpenBisClientExecutesScriptAndCleansTempOutput), OpenBisClientExecutesScriptAndCleansTempOutput),
                 (nameof(BuildExampleSampleDetailsMatchesProfile), BuildExampleSampleDetailsMatchesProfile),
-                (nameof(RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing), RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing)
+                (nameof(RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing), RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing),
+                (nameof(BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved), BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved),
+                (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
+                (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
+                (nameof(SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards), SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards)
             };
 
             int failures = 0;
@@ -389,6 +395,321 @@ namespace OpenBISLabelStudio.Tests
 
                 AssertValidAndDispose(renderer.RenderExamplePreviews(LabelTemplateProfile.Generic), "generic");
             });
+        }
+
+        private static void BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved()
+        {
+            var serverTypes = new[]
+            {
+                new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
+                new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" },
+                new OpenBisTypeInfoDto { Code = "CUSTOM_PLATE", Description = "" }
+            };
+
+            List<ConfiguredOpenBisType> initialRows = SetupSettingsForm.BuildInitialTypeRows(
+                serverTypes,
+                Array.Empty<ConfiguredOpenBisType>());
+
+            AssertEqual(3, initialRows.Count, "Expected one row per server type");
+            AssertEqual(LabelTemplateProfile.Molecule, initialRows[0].TemplateProfile, "SUBSTANCE must default to Molecule");
+            AssertEqual("Substance", initialRows[0].DisplayName, "SUBSTANCE display name mismatch");
+            AssertEqual(LabelTemplateProfile.Generic, initialRows[1].TemplateProfile, "CRYSTAL must default to Generic");
+            AssertEqual(LabelTemplateProfile.Generic, initialRows[2].TemplateProfile, "CUSTOM_PLATE must default to Generic");
+            AssertEqual("Custom Plate", initialRows[2].DisplayName, "Blank description should fall back to formatted code");
+
+            var saved = new[]
+            {
+                new ConfiguredOpenBisType
+                {
+                    Code = "CRYSTAL",
+                    DisplayName = "Crystal",
+                    TemplateProfile = LabelTemplateProfile.Molecule
+                }
+            };
+
+            List<ConfiguredOpenBisType> mergedRows = SetupSettingsForm.BuildInitialTypeRows(serverTypes, saved);
+            AssertEqual(LabelTemplateProfile.Molecule, mergedRows[0].TemplateProfile, "SUBSTANCE should still default to Molecule");
+            AssertEqual(LabelTemplateProfile.Molecule, mergedRows[1].TemplateProfile, "Saved CRYSTAL mapping must override Generic default");
+            AssertEqual(LabelTemplateProfile.Generic, mergedRows[2].TemplateProfile, "Unconfigured CUSTOM_PLATE should default to Generic");
+
+            // Also verify inside SetupSettingsForm that existing saved mappings stay checked while unseen types stay unchecked.
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok" });
+                configService.SaveConfiguredTypes(saved);
+                configService.SavePrinterConfig(AppConfigService.CreateDefaultPrinterConfig());
+
+                var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+                using var form = new SetupSettingsForm(
+                    configService,
+                    client,
+                    renderer,
+                    SetupDialogMode.Settings,
+                    installedPrintersProvider: () => new[] { "Brother PT-P700" });
+
+                form.ApplyServerTypes(serverTypes);
+                var grid = FindControl<DataGridView>(form, "dgvObjectTypes");
+                var txtFilter = FindControl<TextBox>(form, "txtTypeFilter");
+                AssertEqual(3, grid.Rows.Count, "Grid should display all 3 server types");
+                AssertFalse(Convert.ToBoolean(grid.Rows[0].Cells[0].Value), "Unconfigured SUBSTANCE should not be pre-checked when saved config exists");
+                AssertTrue(Convert.ToBoolean(grid.Rows[1].Cells[0].Value), "Saved CRYSTAL type must stay checked");
+                AssertFalse(Convert.ToBoolean(grid.Rows[2].Cells[0].Value), "Unconfigured CUSTOM_PLATE should not be checked");
+
+                // Filtering must preserve checked/style state across hidden rows.
+                txtFilter.Text = "CUSTOM_PLATE";
+                AssertEqual(1, grid.Rows.Count, "Filter should narrow visible rows to CUSTOM_PLATE");
+                AssertTrue(form.TrySaveSettingsOffline(out string filteredErr), $"Expected offline save while filtered to succeed: {filteredErr}");
+                txtFilter.Text = "";
+                AssertEqual(3, grid.Rows.Count, "Clearing filter should restore all 3 rows");
+                AssertTrue(Convert.ToBoolean(grid.Rows[1].Cells[0].Value), "CRYSTAL must stay checked after filter round-trip");
+
+                List<ConfiguredOpenBisType> persisted = configService.LoadConfiguredTypes();
+                AssertEqual(1, persisted.Count, "Only saved/checked CRYSTAL should be persisted");
+                AssertEqual("CRYSTAL", persisted[0].Code, "Persisted code mismatch");
+                AssertEqual(LabelTemplateProfile.Molecule, persisted[0].TemplateProfile, "Persisted CRYSTAL profile mismatch");
+            });
+        }
+
+        private static void SetupSettingsFormInitializesSafelyWithZeroPrinters()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+
+                using (var wizardForm = new SetupSettingsForm(
+                    configService,
+                    client,
+                    renderer,
+                    SetupDialogMode.Wizard,
+                    SetupWizardStep.Printers,
+                    installedPrintersProvider: () => Array.Empty<string>()))
+                {
+                    AssertEqual(SetupDialogMode.Wizard, wizardForm.Mode, "Expected Wizard mode");
+                    ShowOffscreen(wizardForm);
+                    var warningLabel = FindControl<Label>(wizardForm, "lblNoPrintersWarning");
+                    AssertTrue(warningLabel.Visible, "Zero-printer warning label must be visible on Printers step");
+
+                    var cmbBox = FindControl<ComboBox>(wizardForm, "cmbSmallBoxPrinter");
+                    var cmbMagnet = FindControl<ComboBox>(wizardForm, "cmbMagnetPrinter");
+                    var cmbFlask = FindControl<ComboBox>(wizardForm, "cmbFlaskPrinter");
+                    AssertEqual("Brother PT-P700", cmbBox.Text, "SmallBox printer should fall back to default");
+                    AssertEqual("Brother PT-P700 (Kopie 1)", cmbMagnet.Text, "Magnet printer should fall back to default");
+                    AssertEqual("Brother PT-P700 (Kopie 2)", cmbFlask.Text, "Flask printer should fall back to default");
+                }
+
+                configService.SaveAppConfig(new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok" });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule }
+                });
+                configService.SavePrinterConfig(new PrinterConfig
+                {
+                    SmallBoxPrinter = "Custom Box Queue",
+                    MagnetPrinter = "Custom Magnet Queue",
+                    FlaskPrinter = "Custom Flask Queue"
+                });
+
+                using (var settingsForm = new SetupSettingsForm(
+                    configService,
+                    client,
+                    renderer,
+                    SetupDialogMode.Settings,
+                    SetupWizardStep.Printers,
+                    installedPrintersProvider: () => Array.Empty<string>()))
+                {
+                    AssertEqual(SetupDialogMode.Settings, settingsForm.Mode, "Expected Settings mode");
+                    ShowOffscreen(settingsForm);
+                    var warningLabel = FindControl<Label>(settingsForm, "lblNoPrintersWarning");
+                    AssertTrue(warningLabel.Visible, "Zero-printer warning label must be visible in Settings Printer Routing tab");
+
+                    var cmbBox = FindControl<ComboBox>(settingsForm, "cmbSmallBoxPrinter");
+                    var cmbMagnet = FindControl<ComboBox>(settingsForm, "cmbMagnetPrinter");
+                    var cmbFlask = FindControl<ComboBox>(settingsForm, "cmbFlaskPrinter");
+                    AssertEqual("Custom Box Queue", cmbBox.Text, "SmallBox printer should keep configured name");
+                    AssertEqual("Custom Magnet Queue", cmbMagnet.Text, "Magnet printer should keep configured name");
+                    AssertEqual("Custom Flask Queue", cmbFlask.Text, "Flask printer should keep configured name");
+                }
+            });
+        }
+
+        private static void SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "stale-expired-token"
+                });
+
+                var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+
+                using var form = new SetupSettingsForm(
+                    configService,
+                    client,
+                    renderer,
+                    SetupDialogMode.ExpiredTokenRecovery,
+                    SetupWizardStep.Connection,
+                    initialWarning: "Token expired",
+                    installedPrintersProvider: () => Array.Empty<string>());
+
+                AssertEqual(SetupDialogMode.ExpiredTokenRecovery, form.Mode, "Expected ExpiredTokenRecovery mode");
+                var txtUrl = FindControl<TextBox>(form, "txtInstanceUrl");
+                var txtToken = FindControl<TextBox>(form, "txtToken");
+                var lblStatus = FindControl<Label>(form, "lblConnectionStatus");
+
+                AssertEqual("https://openbis.example.org", txtUrl.Text, "Saved URL must be pre-filled");
+                AssertEqual("", txtToken.Text, "Token field must be cleared in ExpiredTokenRecovery mode");
+                AssertTrue(lblStatus.Text.Contains("Token expired", StringComparison.OrdinalIgnoreCase),
+                    $"Expected inline warning to show initial warning, actual: {lblStatus.Text}");
+                AssertTrue(ReferenceEquals(form.ActiveControl, txtToken), "Token textbox must be ActiveControl for immediate replacement");
+
+                ShowOffscreen(form);
+                AssertTrue(ReferenceEquals(form.ActiveControl, txtToken), "Token textbox must stay active after Shown");
+            });
+        }
+
+        private static void SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://initial.example.org",
+                    Token = "initial-token"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ConfiguredOpenBisType { Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+                configService.SavePrinterConfig(new PrinterConfig
+                {
+                    SmallBoxPrinter = "Printer A",
+                    MagnetPrinter = "Printer B",
+                    FlaskPrinter = "Printer C"
+                });
+
+                string origAppJson = File.ReadAllText(configService.OpenBisConfigPath);
+                string origTypesJson = File.ReadAllText(configService.OpenBisTypesPath);
+                string origPrintersJson = File.ReadAllText(configService.PrintersConfigPath);
+
+                var offlineClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+                string[] printers = { "Printer A", "Printer B", "Printer C", "Printer X", "Printer Y", "Printer Z" };
+
+                // 1. Modify state and Cancel -> disk files must remain untouched.
+                using (var cancelForm = new SetupSettingsForm(
+                    configService,
+                    offlineClient,
+                    renderer,
+                    SetupDialogMode.Settings,
+                    installedPrintersProvider: () => printers))
+                {
+                    FindControl<TextBox>(cancelForm, "txtInstanceUrl").Text = "https://changed.example.org";
+                    FindControl<TextBox>(cancelForm, "txtToken").Text = "changed-token";
+                    FindControl<ComboBox>(cancelForm, "cmbSmallBoxPrinter").SelectedItem = "Printer X";
+                    FindControl<DataGridView>(cancelForm, "dgvObjectTypes").Rows[1].Cells[2].Value = "Molecule / Substance";
+
+                    ShowOffscreen(cancelForm);
+                    FindControl<Button>(cancelForm, "btnCancel").PerformClick();
+                }
+
+                AssertEqual(origAppJson, File.ReadAllText(configService.OpenBisConfigPath), "Cancel must leave openbis_config.json unchanged");
+                AssertEqual(origTypesJson, File.ReadAllText(configService.OpenBisTypesPath), "Cancel must leave openbis_types.json unchanged");
+                AssertEqual(origPrintersJson, File.ReadAllText(configService.PrintersConfigPath), "Cancel must leave printers_config.json unchanged");
+
+                // 2. Verify live example preview rendering on Page 2 + invalid save guard + valid TrySaveSettingsOffline.
+                using (var saveForm = new SetupSettingsForm(
+                    configService,
+                    offlineClient,
+                    renderer,
+                    SetupDialogMode.Settings,
+                    SetupWizardStep.ObjectTypes,
+                    installedPrintersProvider: () => printers))
+                {
+                    // Pre-seed CachedServerTypes so OnShown does not spawn offlineClient during UI preview verification.
+                    saveForm.ApplyServerTypes(new[]
+                    {
+                        new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
+                        new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" }
+                    });
+                    ShowOffscreen(saveForm);
+
+                    AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewSmallBox").Image, "SmallBox preview image should be populated");
+                    AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewMagnet").Image, "Magnet preview image should be populated");
+                    AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewFlask").Image, "Flask preview image should be populated");
+
+                    FindControl<Button>(saveForm, "btnPreviewGeneric").PerformClick();
+                    AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewMagnet").Image, "Generic Magnet preview image should be populated");
+
+                    FindControl<TextBox>(saveForm, "txtInstanceUrl").Text = "https://updated.example.org";
+                    FindControl<TextBox>(saveForm, "txtToken").Text = "";
+                    AssertFalse(saveForm.TrySaveSettingsOffline(out string emptyTokenErr), "Empty token must fail offline validation");
+                    AssertTrue(!string.IsNullOrWhiteSpace(emptyTokenErr), "Expected non-empty validation error for empty token");
+
+                    FindControl<TextBox>(saveForm, "txtToken").Text = "updated-token";
+                    var grid = FindControl<DataGridView>(saveForm, "dgvObjectTypes");
+                    grid.Rows[0].Cells[0].Value = false;
+                    grid.Rows[1].Cells[0].Value = false;
+                    AssertFalse(saveForm.TrySaveSettingsOffline(out string noTypeErr), "Zero checked types must fail offline validation");
+                    AssertEqual("Select at least one object type.", noTypeErr, "Expected exact empty object types error message");
+
+                    grid.Rows[0].Cells[0].Value = true;
+                    grid.Rows[1].Cells[0].Value = true;
+                    grid.Rows[1].Cells[2].Value = "Molecule / Substance";
+
+                    FindControl<ComboBox>(saveForm, "cmbSmallBoxPrinter").SelectedItem = "Printer X";
+                    FindControl<ComboBox>(saveForm, "cmbMagnetPrinter").SelectedItem = "Printer Y";
+                    FindControl<ComboBox>(saveForm, "cmbFlaskPrinter").SelectedItem = "Printer Z";
+
+                    bool saved = saveForm.TrySaveSettingsOffline(out string validationError);
+                    AssertTrue(saved, $"Expected TrySaveSettingsOffline to succeed, got error: {validationError}");
+                    AssertEqual("", validationError, "Expected empty validation error on successful save");
+                }
+
+                var verifyService = new AppConfigService(tempRoot);
+                AppConfig? savedApp = verifyService.LoadAppConfig();
+                AssertNotNull(savedApp, "Saved AppConfig missing");
+                AssertEqual("https://updated.example.org", savedApp!.OpenBisUrl, "Updated URL mismatch");
+                AssertEqual("updated-token", savedApp.Token, "Updated token mismatch");
+
+                List<ConfiguredOpenBisType> savedTypes = verifyService.LoadConfiguredTypes();
+                AssertEqual(2, savedTypes.Count, "Expected 2 saved types");
+                AssertEqual(LabelTemplateProfile.Molecule, savedTypes[1].TemplateProfile, "Updated CRYSTAL template profile mismatch");
+
+                PrinterConfig? savedPrinters = verifyService.LoadPrinterConfig();
+                AssertNotNull(savedPrinters, "Saved PrinterConfig missing");
+                AssertEqual("Printer X", savedPrinters!.SmallBoxPrinter, "Updated SmallBoxPrinter mismatch");
+                AssertEqual("Printer Y", savedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
+                AssertEqual("Printer Z", savedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
+            });
+        }
+
+        private static void ShowOffscreen(Form form)
+        {
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-32000, -32000);
+            form.ShowInTaskbar = false;
+            form.Show();
+        }
+
+        private static T FindControl<T>(Control root, string name) where T : Control
+        {
+            Control[] matches = root.Controls.Find(name, searchAllChildren: true);
+            if (matches.Length == 0 || matches[0] is not T typed)
+            {
+                throw new InvalidOperationException($"Expected control '{name}' of type {typeof(T).Name} on {root.Name}.");
+            }
+
+            return typed;
         }
 
         private static void WithTempDir(Action<string> action)

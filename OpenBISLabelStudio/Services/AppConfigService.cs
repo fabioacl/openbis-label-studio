@@ -5,10 +5,11 @@ using System.Linq;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OpenBISLabelStudio.Models;
 
 namespace OpenBISLabelStudio.Services
 {
+    using OpenBISLabelStudio.Models;
+
     /// <summary>
     /// Manages configuration files under config/, template path resolution under templates/,
     /// wizard readiness checks, and printer matching.
