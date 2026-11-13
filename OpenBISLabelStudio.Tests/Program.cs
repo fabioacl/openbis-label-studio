@@ -30,7 +30,10 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved), BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved),
                 (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
                 (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
-                (nameof(SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards), SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards)
+                (nameof(SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards), SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards),
+                (nameof(Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks), Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks),
+                (nameof(Form1HasSettingsButtonWithoutOverlaps), Form1HasSettingsButtonWithoutOverlaps),
+                (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges)
             };
 
             int failures = 0;
@@ -690,6 +693,210 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual("Printer X", savedPrinters!.SmallBoxPrinter, "Updated SmallBoxPrinter mismatch");
                 AssertEqual("Printer Y", savedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
                 AssertEqual("Printer Z", savedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
+            });
+        }
+
+        private static void Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType
+                    {
+                        Code = "CRYSTAL",
+                        DisplayName = "Crystal",
+                        TemplateProfile = LabelTemplateProfile.Molecule
+                    },
+                    new ConfiguredOpenBisType
+                    {
+                        Code = "SUBSTANCE",
+                        DisplayName = "Substance",
+                        TemplateProfile = LabelTemplateProfile.Generic
+                    },
+                    new ConfiguredOpenBisType
+                    {
+                        Code = "CUSTOM_2D",
+                        DisplayName = "Custom 2D",
+                        TemplateProfile = LabelTemplateProfile.Molecule
+                    }
+                });
+
+                List<ConfiguredOpenBisType> configuredTypes = configService.LoadConfiguredTypes();
+
+                // Mapped non-SUBSTANCE type must resolve to Molecule.
+                AssertEqual(
+                    LabelTemplateProfile.Molecule,
+                    Form1.ResolveTemplateProfile("CRYSTAL", configuredTypes, null),
+                    "Mapped non-SUBSTANCE type should resolve to Molecule");
+
+                // Lookup must be case-insensitive and trim whitespace.
+                AssertEqual(
+                    LabelTemplateProfile.Molecule,
+                    Form1.ResolveTemplateProfile("  crystal  ", configuredTypes, null),
+                    "ResolveTemplateProfile should be case-insensitive and trim whitespace");
+
+                // Explicit configured mapping overrides legacy SUBSTANCE assumption.
+                AssertEqual(
+                    LabelTemplateProfile.Generic,
+                    Form1.ResolveTemplateProfile("SUBSTANCE", configuredTypes, null),
+                    "Configured Generic profile for SUBSTANCE must override legacy hardcoded assumption");
+
+                // Fallback via sampleDetailsType when selectedTypeCode is empty, null, or unconfigured.
+                AssertEqual(
+                    LabelTemplateProfile.Molecule,
+                    Form1.ResolveTemplateProfile("", configuredTypes, "CUSTOM_2D"),
+                    "Empty selectedTypeCode should fall back to sampleDetailsType");
+                AssertEqual(
+                    LabelTemplateProfile.Molecule,
+                    Form1.ResolveTemplateProfile(null, configuredTypes, "custom_2d"),
+                    "Null selectedTypeCode should fall back to case-insensitive sampleDetailsType");
+                AssertEqual(
+                    LabelTemplateProfile.Molecule,
+                    Form1.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "CRYSTAL"),
+                    "Unconfigured selectedTypeCode should fall back to sampleDetailsType");
+
+                // Unmapped types default to Generic regardless of hardcoded SUBSTANCE name.
+                AssertEqual(
+                    LabelTemplateProfile.Generic,
+                    Form1.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "ALSO_UNCONFIGURED"),
+                    "Unmapped type should resolve to Generic");
+                AssertEqual(
+                    LabelTemplateProfile.Generic,
+                    Form1.ResolveTemplateProfile(null, configuredTypes, null),
+                    "Null inputs should resolve to Generic");
+                AssertEqual(
+                    LabelTemplateProfile.Generic,
+                    Form1.ResolveTemplateProfile("SUBSTANCE", Array.Empty<ConfiguredOpenBisType>(), "SUBSTANCE"),
+                    "Empty configured types should default to Generic");
+                AssertEqual(
+                    LabelTemplateProfile.Generic,
+                    Form1.ResolveTemplateProfile("SUBSTANCE", null, "SUBSTANCE"),
+                    "Null configured types should default safely to Generic");
+            });
+        }
+
+        private static void Form1HasSettingsButtonWithoutOverlaps()
+        {
+            using var form = new Form1();
+            Button btnLoad = FindControl<Button>(form, "loadPrintTemplates");
+            Button btnPrint = FindControl<Button>(form, "btnPrintLabel");
+            Button btnSettings = FindControl<Button>(form, "btnSettings");
+            Label lblStatus = FindControl<Label>(form, "lblStatusNotice");
+            ComboBox cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+            GroupBox grpBox = FindControl<GroupBox>(form, "smallBoxLabelGroupBox");
+            GroupBox grpMagnet = FindControl<GroupBox>(form, "magnetLabelGroupBox");
+            GroupBox grpFlask = FindControl<GroupBox>(form, "flaskLabelGroupBox");
+
+            AssertEqual("Settings...", btnSettings.Text, "Settings button text mismatch");
+            AssertTrue(btnSettings.Enabled, "Settings button must be enabled");
+
+            Rectangle clientBounds = new Rectangle(Point.Empty, form.ClientSize);
+            AssertTrue(clientBounds.Contains(btnLoad.Bounds), $"Load button outside ClientSize: {btnLoad.Bounds}");
+            AssertTrue(clientBounds.Contains(btnPrint.Bounds), $"Print button outside ClientSize: {btnPrint.Bounds}");
+            AssertTrue(clientBounds.Contains(btnSettings.Bounds), $"Settings button outside ClientSize: {btnSettings.Bounds}");
+            AssertTrue(clientBounds.Contains(lblStatus.Bounds), $"Status notice label outside ClientSize: {lblStatus.Bounds}");
+
+            AssertFalse(btnLoad.Bounds.IntersectsWith(btnPrint.Bounds), "Load and Print buttons must not overlap");
+            AssertFalse(btnLoad.Bounds.IntersectsWith(btnSettings.Bounds), "Load and Settings buttons must not overlap");
+            AssertFalse(btnPrint.Bounds.IntersectsWith(btnSettings.Bounds), "Print and Settings buttons must not overlap");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(cmbObjects.Bounds), "Status notice must not overlap objects dropdown");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(grpBox.Bounds), "Status notice must not overlap Small Box group");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(grpMagnet.Bounds), "Status notice must not overlap Magnet group");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(grpFlask.Bounds), "Status notice must not overlap Flask group");
+            AssertFalse(grpBox.Bounds.IntersectsWith(btnLoad.Bounds), "GroupBoxes must not overlap bottom buttons");
+            AssertFalse(grpMagnet.Bounds.IntersectsWith(btnPrint.Bounds), "Magnet group must not overlap Print button");
+            AssertFalse(grpFlask.Bounds.IntersectsWith(btnSettings.Bounds), "Flask group must not overlap Settings button");
+        }
+
+        private static void Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "valid-looking-token"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType
+                    {
+                        Code = "CRYSTAL",
+                        DisplayName = "Lab Crystal",
+                        TemplateProfile = LabelTemplateProfile.Molecule
+                    },
+                    new ConfiguredOpenBisType
+                    {
+                        Code = "SUBSTRATE",
+                        DisplayName = "Silicon Substrate",
+                        TemplateProfile = LabelTemplateProfile.Generic
+                    }
+                });
+                configService.SavePrinterConfig(new PrinterConfig
+                {
+                    SmallBoxPrinter = "Printer A",
+                    MagnetPrinter = "Printer B",
+                    FlaskPrinter = "Printer C"
+                });
+
+                var offlineClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+
+                // 1. Verify safe startup with zero installed printers and cached types shown alongside non-fatal notice.
+                using (var zeroPrinterForm = new Form1(
+                    configService,
+                    offlineClient,
+                    renderer,
+                    installedPrintersProvider: () => Array.Empty<string>()))
+                {
+                    ShowOffscreen(zeroPrinterForm);
+
+                    var cmbTypes = FindControl<ComboBox>(zeroPrinterForm, "openbisTypeComboBox");
+                    var lblNotice = FindControl<Label>(zeroPrinterForm, "lblStatusNotice");
+                    var btnSettings = FindControl<Button>(zeroPrinterForm, "btnSettings");
+                    var cmbBox = FindControl<ComboBox>(zeroPrinterForm, "smallBoxPrinterComboBox");
+                    var cmbMagnet = FindControl<ComboBox>(zeroPrinterForm, "magnetPrinterComboBox");
+                    var cmbFlask = FindControl<ComboBox>(zeroPrinterForm, "flaskPrinterComboBox");
+
+                    AssertTrue(btnSettings.Visible && btnSettings.Enabled, "Settings button must be visible and enabled when shown");
+                    AssertEqual(3, cmbTypes.Items.Count, "Expected placeholder plus 2 cached types in dropdown");
+                    AssertTrue(lblNotice.Visible && !string.IsNullOrWhiteSpace(lblNotice.Text),
+                        "Expected non-fatal notice banner when startup type refresh fails");
+                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Zero-printer fallback should preserve SmallBoxPrinter");
+                    AssertEqual("Printer B", cmbMagnet.SelectedItem?.ToString(), "Zero-printer fallback should preserve MagnetPrinter");
+                    AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Zero-printer fallback should preserve FlaskPrinter");
+                }
+
+                // 2. Verify initial population respects _isPopulatingPrinters and manual selection immediately persists.
+                using (var form = new Form1(
+                    configService,
+                    offlineClient,
+                    renderer,
+                    installedPrintersProvider: () => new[] { "Printer A", "Printer B", "Printer C" }))
+                {
+                    ShowOffscreen(form);
+
+                    var cmbBox = FindControl<ComboBox>(form, "smallBoxPrinterComboBox");
+                    var cmbMagnet = FindControl<ComboBox>(form, "magnetPrinterComboBox");
+                    var cmbFlask = FindControl<ComboBox>(form, "flaskPrinterComboBox");
+
+                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Initial SmallBoxPrinter selection mismatch");
+                    AssertEqual("Printer B", cmbMagnet.SelectedItem?.ToString(), "Initial MagnetPrinter selection mismatch");
+                    AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Initial FlaskPrinter selection mismatch");
+
+                    cmbBox.SelectedIndex = 1;    // Printer B
+                    cmbMagnet.SelectedIndex = 2; // Printer C
+                    cmbFlask.SelectedIndex = 0;  // Printer A
+                }
+
+                PrinterConfig? persisted = configService.LoadPrinterConfig();
+                AssertNotNull(persisted, "PrinterConfig should exist after auto-save");
+                AssertEqual("Printer B", persisted!.SmallBoxPrinter, "Auto-saved SmallBoxPrinter mismatch");
+                AssertEqual("Printer C", persisted.MagnetPrinter, "Auto-saved MagnetPrinter mismatch");
+                AssertEqual("Printer A", persisted.FlaskPrinter, "Auto-saved FlaskPrinter mismatch");
             });
         }
 

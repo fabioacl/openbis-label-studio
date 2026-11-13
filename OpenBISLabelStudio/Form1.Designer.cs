@@ -13,12 +13,18 @@ namespace OpenBISLabelStudio
         /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
         protected override void Dispose(bool disposing)
         {
-            if (disposing && (components != null))
+            if (disposing)
             {
-                components.Dispose();
+                DisposeManagedResources();
+                if (components != null)
+                {
+                    components.Dispose();
+                }
             }
             base.Dispose(disposing);
         }
+
+        partial void DisposeManagedResources();
 
         #region Windows Form Designer generated code
 
@@ -32,8 +38,10 @@ namespace OpenBISLabelStudio
             openbisTypeComboBox = new ComboBox();
             selectedOpenbisTypeLabel = new Label();
             openbisObjectsComboBox = new ComboBox();
+            lblStatusNotice = new Label();
             loadPrintTemplates = new Button();
             btnPrintLabel = new Button();
+            btnSettings = new Button();
             smallBoxLabelGroupBox = new GroupBox();
             smallBoxPrinterComboBox = new ComboBox();
             smallBoxPrinterLabel = new Label();
@@ -98,9 +106,20 @@ namespace OpenBISLabelStudio
             openbisObjectsComboBox.Size = new Size(875, 28);
             openbisObjectsComboBox.TabIndex = 3;
             // 
+            // lblStatusNotice
+            // 
+            lblStatusNotice.AutoEllipsis = true;
+            lblStatusNotice.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+            lblStatusNotice.ForeColor = Color.FromArgb(180, 83, 9);
+            lblStatusNotice.Location = new Point(40, 92);
+            lblStatusNotice.Name = "lblStatusNotice";
+            lblStatusNotice.Size = new Size(1000, 20);
+            lblStatusNotice.TabIndex = 10;
+            lblStatusNotice.Visible = false;
+            // 
             // loadPrintTemplates
             // 
-            loadPrintTemplates.Location = new Point(330, 460);
+            loadPrintTemplates.Location = new Point(215, 460);
             loadPrintTemplates.Name = "loadPrintTemplates";
             loadPrintTemplates.Size = new Size(190, 48);
             loadPrintTemplates.TabIndex = 4;
@@ -110,7 +129,7 @@ namespace OpenBISLabelStudio
             // 
             // btnPrintLabel
             // 
-            btnPrintLabel.Location = new Point(560, 460);
+            btnPrintLabel.Location = new Point(445, 460);
             btnPrintLabel.Name = "btnPrintLabel";
             btnPrintLabel.Size = new Size(190, 48);
             btnPrintLabel.TabIndex = 5;
@@ -118,16 +137,26 @@ namespace OpenBISLabelStudio
             btnPrintLabel.UseVisualStyleBackColor = true;
             btnPrintLabel.Click += btnPrintLabel_Click_1;
             // 
+            // btnSettings
+            // 
+            btnSettings.Location = new Point(675, 460);
+            btnSettings.Name = "btnSettings";
+            btnSettings.Size = new Size(190, 48);
+            btnSettings.TabIndex = 6;
+            btnSettings.Text = "Settings...";
+            btnSettings.UseVisualStyleBackColor = true;
+            btnSettings.Click += btnSettings_Click;
+            // 
             // smallBoxLabelGroupBox
             // 
             smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterComboBox);
             smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterLabel);
             smallBoxLabelGroupBox.Controls.Add(smallBoxLabelCheckBox);
             smallBoxLabelGroupBox.Controls.Add(smallBoxLabelPreview);
-            smallBoxLabelGroupBox.Location = new Point(40, 110);
+            smallBoxLabelGroupBox.Location = new Point(40, 116);
             smallBoxLabelGroupBox.Name = "smallBoxLabelGroupBox";
-            smallBoxLabelGroupBox.Size = new Size(300, 330);
-            smallBoxLabelGroupBox.TabIndex = 6;
+            smallBoxLabelGroupBox.Size = new Size(300, 326);
+            smallBoxLabelGroupBox.TabIndex = 7;
             smallBoxLabelGroupBox.TabStop = false;
             smallBoxLabelGroupBox.Text = "Small Box 12mm Label";
             smallBoxLabelGroupBox.Enter += groupBox1_Enter;
@@ -140,6 +169,7 @@ namespace OpenBISLabelStudio
             smallBoxPrinterComboBox.Name = "smallBoxPrinterComboBox";
             smallBoxPrinterComboBox.Size = new Size(270, 28);
             smallBoxPrinterComboBox.TabIndex = 3;
+            smallBoxPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // smallBoxPrinterLabel
             // 
@@ -177,10 +207,10 @@ namespace OpenBISLabelStudio
             magnetLabelGroupBox.Controls.Add(magnetFreeTextLabel);
             magnetLabelGroupBox.Controls.Add(magnetLabelCheckBox);
             magnetLabelGroupBox.Controls.Add(magnetLabelPreview);
-            magnetLabelGroupBox.Location = new Point(365, 110);
+            magnetLabelGroupBox.Location = new Point(365, 116);
             magnetLabelGroupBox.Name = "magnetLabelGroupBox";
-            magnetLabelGroupBox.Size = new Size(330, 330);
-            magnetLabelGroupBox.TabIndex = 7;
+            magnetLabelGroupBox.Size = new Size(330, 326);
+            magnetLabelGroupBox.TabIndex = 8;
             magnetLabelGroupBox.TabStop = false;
             magnetLabelGroupBox.Text = "Magnet 12mm Label";
             // 
@@ -192,6 +222,7 @@ namespace OpenBISLabelStudio
             magnetPrinterComboBox.Name = "magnetPrinterComboBox";
             magnetPrinterComboBox.Size = new Size(300, 28);
             magnetPrinterComboBox.TabIndex = 5;
+            magnetPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // magnetPrinterLabel
             // 
@@ -247,10 +278,10 @@ namespace OpenBISLabelStudio
             flaskLabelGroupBox.Controls.Add(flaskFreeTextLabel);
             flaskLabelGroupBox.Controls.Add(flaskLabelCheckBox);
             flaskLabelGroupBox.Controls.Add(flaskLabelPreview);
-            flaskLabelGroupBox.Location = new Point(720, 110);
+            flaskLabelGroupBox.Location = new Point(720, 116);
             flaskLabelGroupBox.Name = "flaskLabelGroupBox";
-            flaskLabelGroupBox.Size = new Size(320, 330);
-            flaskLabelGroupBox.TabIndex = 8;
+            flaskLabelGroupBox.Size = new Size(320, 326);
+            flaskLabelGroupBox.TabIndex = 9;
             flaskLabelGroupBox.TabStop = false;
             flaskLabelGroupBox.Text = "Flask 24mm Label";
             // 
@@ -262,6 +293,7 @@ namespace OpenBISLabelStudio
             flaskPrinterComboBox.Name = "flaskPrinterComboBox";
             flaskPrinterComboBox.Size = new Size(290, 28);
             flaskPrinterComboBox.TabIndex = 5;
+            flaskPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // flaskPrinterLabel
             // 
@@ -317,8 +349,10 @@ namespace OpenBISLabelStudio
             Controls.Add(flaskLabelGroupBox);
             Controls.Add(magnetLabelGroupBox);
             Controls.Add(smallBoxLabelGroupBox);
+            Controls.Add(btnSettings);
             Controls.Add(btnPrintLabel);
             Controls.Add(loadPrintTemplates);
+            Controls.Add(lblStatusNotice);
             Controls.Add(openbisObjectsComboBox);
             Controls.Add(selectedOpenbisTypeLabel);
             Controls.Add(openbisTypeComboBox);
@@ -346,8 +380,10 @@ namespace OpenBISLabelStudio
         private ComboBox openbisTypeComboBox;
         private Label selectedOpenbisTypeLabel;
         private ComboBox openbisObjectsComboBox;
+        private Label lblStatusNotice;
         private Button loadPrintTemplates;
         private Button btnPrintLabel;
+        private Button btnSettings;
         private GroupBox smallBoxLabelGroupBox;
         private PictureBox smallBoxLabelPreview;
         private CheckBox smallBoxLabelCheckBox;
