@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using OpenBISLabelStudio.Models;
 using OpenBISLabelStudio.Services;
+using ModelTypes = OpenBISLabelStudio.Models;
 
 namespace OpenBISLabelStudio.Tests
 {
@@ -18,7 +20,11 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(SaveAndLoadAllConfigsRoundTrip), SaveAndLoadAllConfigsRoundTrip),
                 (nameof(LegacyStringArrayTypesReadCompatibility), LegacyStringArrayTypesReadCompatibility),
                 (nameof(ResolvesTemplatePathsUnderTemplatesFolder), ResolvesTemplatePathsUnderTemplatesFolder),
-                (nameof(FindBestPrinterIndexHandlesZeroPrinters), FindBestPrinterIndexHandlesZeroPrinters)
+                (nameof(FindBestPrinterIndexHandlesZeroPrinters), FindBestPrinterIndexHandlesZeroPrinters),
+                (nameof(OpenBisClientSurfacesStderrWhenPythonFails), OpenBisClientSurfacesStderrWhenPythonFails),
+                (nameof(OpenBisClientExecutesScriptAndCleansTempOutput), OpenBisClientExecutesScriptAndCleansTempOutput),
+                (nameof(BuildExampleSampleDetailsMatchesProfile), BuildExampleSampleDetailsMatchesProfile),
+                (nameof(RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing), RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing)
             };
 
             int failures = 0;
@@ -223,6 +229,166 @@ namespace OpenBISLabelStudio.Tests
                 "Partial match should succeed when exact match absent");
             AssertEqual(0, AppConfigService.FindBestPrinterIndex(new[] { "Office Printer", "Lab Printer" }, "Missing Printer"),
                 "Unmatched preferred printer should fall back to index 0");
+        }
+
+        private static void OpenBisClientSurfacesStderrWhenPythonFails()
+        {
+            ModelTypes.OpenBisTypesResult mockErr = OpenBisClient.DeserializeOrError(
+                null,
+                1,
+                "ModuleNotFoundError: No module named 'pybis'",
+                (errorType, error) => new ModelTypes.OpenBisTypesResult
+                {
+                    Success = false,
+                    ErrorType = errorType,
+                    Error = error
+                });
+
+            AssertFalse(mockErr.Success, "DeserializeOrError must return Success = false on missing JSON");
+            AssertEqual("unknown_error", mockErr.ErrorType, "DeserializeOrError must classify missing JSON/stderr as unknown_error");
+            AssertTrue(mockErr.Error.Contains("pybis", StringComparison.OrdinalIgnoreCase),
+                $"Expected stderr error to mention pybis, actual: {mockErr.Error}");
+
+            WithTempDir(tempRoot =>
+            {
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import sys\n" +
+                    "sys.stderr.write(\"ModuleNotFoundError: No module named 'pybis'\\n\")\n" +
+                    "sys.exit(1)\n");
+
+                var missingExeClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
+                ModelTypes.OpenBisTypesResult launchErr = missingExeClient.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertFalse(launchErr.Success, "Missing python binary must fail");
+                AssertEqual("unknown_error", launchErr.ErrorType, "Missing python binary must report unknown_error");
+                AssertTrue(!string.IsNullOrWhiteSpace(launchErr.Error), "Missing python binary must surface diagnostic error text");
+
+                var stderrClient = new OpenBisClient(tempRoot);
+                ModelTypes.OpenBisTypesResult stderrErr = stderrClient.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertFalse(stderrErr.Success, "Failing Python script without --out must fail");
+                AssertEqual("unknown_error", stderrErr.ErrorType, "Failing Python script without --out must report unknown_error");
+                AssertTrue(stderrErr.Error.Contains("pybis", StringComparison.OrdinalIgnoreCase),
+                    $"Expected Python process stderr to surface pybis error, actual: {stderrErr.Error}");
+            });
+        }
+
+        private static void OpenBisClientExecutesScriptAndCleansTempOutput()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string recordFile = Path.Combine(tempRoot, "recorded_out_path.txt");
+                string argsFile = Path.Combine(tempRoot, "recorded_args.json");
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "args = sys.argv[1:]\n" +
+                    "out_idx = args.index('--out')\n" +
+                    "out_path = args[out_idx + 1]\n" +
+                    $"with open(r'''{recordFile}''', 'w', encoding='utf-8') as rf:\n" +
+                    "    rf.write(out_path)\n" +
+                    $"with open(r'''{argsFile}''', 'w', encoding='utf-8') as af:\n" +
+                    "    json.dump(args, af)\n" +
+                    "if '--types' in args:\n" +
+                    "    payload = {'success': False, 'errorType': 'token_expired', 'error': 'Expired'}\n" +
+                    "elif '--details' in args:\n" +
+                    "    payload = {'success': True, 'details': {'permId': '2026-1', 'name': 'CuPc', 'sampleType': 'SUBSTANCE'}}\n" +
+                    "else:\n" +
+                    "    payload = {'success': True, 'data': [{'name': 'Sample-A', 'permId': '2026-9', 'modificationDate': '2026-11-13'}]}\n" +
+                    "with open(out_path, 'w', encoding='utf-8') as f:\n" +
+                    "    json.dump(payload, f)\n");
+
+                var client = new OpenBisClient(tempRoot);
+                string tokenWithSpecialChars = "tok&1 \"quoted\" %TEMP%";
+                ModelTypes.OpenBisTypesResult result = client.QueryTypesAsync("https://openbis.example.org", tokenWithSpecialChars).GetAwaiter().GetResult();
+
+                AssertFalse(result.Success, "Stub returned success=false");
+                AssertEqual("token_expired", result.ErrorType, "Expected ErrorType token_expired from stub JSON");
+                AssertEqual("Expired", result.Error, "Expected Error message from stub JSON");
+
+                AssertTrue(File.Exists(recordFile), "Stub script did not execute and record --out path");
+                string recordedOutPath = File.ReadAllText(recordFile).Trim();
+                AssertTrue(recordedOutPath.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase),
+                    $"Expected --out path under temp directory, actual: {recordedOutPath}");
+                AssertFalse(File.Exists(recordedOutPath), $"Temp JSON output file must be deleted after reading: {recordedOutPath}");
+
+                string recordedArgsJson = File.ReadAllText(argsFile);
+                AssertTrue(recordedArgsJson.Contains(tokenWithSpecialChars.Replace("\"", "\\\""), StringComparison.Ordinal),
+                    $"Expected ArgumentList to preserve special characters in token, actual args: {recordedArgsJson}");
+
+                ModelTypes.OpenBisDetailsResult detailsResult = client.QuerySampleDetailsAsync("https://openbis.example.org", tokenWithSpecialChars, "2026-1").GetAwaiter().GetResult();
+                AssertTrue(detailsResult.Success, "Details stub should succeed");
+                AssertNotNull(detailsResult.Details, "Details payload should be deserialized");
+                AssertEqual("CuPc", detailsResult.Details!.Name, "Details Name mismatch");
+
+                string secondRecordedOutPath = File.ReadAllText(recordFile).Trim();
+                AssertFalse(File.Exists(secondRecordedOutPath), $"Second temp JSON output file must be deleted: {secondRecordedOutPath}");
+
+                ModelTypes.OpenBisListResult listResult = client.QuerySamplesByTypeAsync("https://openbis.example.org", tokenWithSpecialChars, "SUBSTANCE").GetAwaiter().GetResult();
+                AssertTrue(listResult.Success, "Sample list stub should succeed");
+                AssertEqual(1, listResult.Data.Count, "Sample list count mismatch");
+                AssertEqual("Sample-A", listResult.Data[0].Name, "Sample list item Name mismatch");
+
+                string thirdRecordedOutPath = File.ReadAllText(recordFile).Trim();
+                AssertFalse(File.Exists(thirdRecordedOutPath), $"Third temp JSON output file must be deleted: {thirdRecordedOutPath}");
+            });
+        }
+
+        private static void BuildExampleSampleDetailsMatchesProfile()
+        {
+            ModelTypes.SampleDetailsDto molecule = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule);
+            AssertEqual("CuPc-F16", molecule.Name, "Molecule example Name mismatch");
+            AssertEqual("20261113-EX01", molecule.PermId, "Molecule example PermId mismatch");
+            AssertEqual("520 K", molecule.EvaporationTemperature, "Molecule example EvaporationTemperature mismatch");
+            AssertEqual("Jane Doe", molecule.StudiedByName, "Molecule example StudiedByName mismatch");
+            AssertEqual("jdoe", molecule.StudiedByUsername, "Molecule example StudiedByUsername mismatch");
+            AssertEqual("Cabinet A-3", molecule.StorageLocation, "Molecule example StorageLocation mismatch");
+            AssertEqual("Sigma-Aldrich", molecule.SupplierOwnName, "Molecule example SupplierOwnName mismatch");
+            AssertTrue(molecule.IconFlags.Poisonous, "Molecule example Poisonous flag must be true");
+            AssertTrue(molecule.IconFlags.Dry, "Molecule example Dry flag must be true");
+            AssertFalse(molecule.IconFlags.Flammable, "Molecule example Flammable flag must be false");
+
+            ModelTypes.SampleDetailsDto generic = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Generic);
+            AssertEqual("Sample-001", generic.Name, "Generic example Name mismatch");
+            AssertEqual("20261113-EX02", generic.PermId, "Generic example PermId mismatch");
+        }
+
+        private static void RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing()
+        {
+            static void AssertValidAndDispose(Dictionary<LabelTemplateType, Image> previews, string label)
+            {
+                try
+                {
+                    AssertEqual(3, previews.Count, $"Expected {label} previews for all 3 template slots");
+                    foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+                    {
+                        AssertTrue(previews.TryGetValue(slot, out Image? image), $"Missing {label} preview for slot {slot}");
+                        AssertNotNull(image, $"{label} preview image for {slot} must not be null");
+                        AssertTrue(image is Bitmap, $"{label} preview image for {slot} must be a Bitmap");
+                        AssertTrue(image!.Width > 0 && image.Height > 0, $"{label} preview bitmap for {slot} must have non-zero dimensions");
+                    }
+                }
+                finally
+                {
+                    foreach (Image img in previews.Values)
+                    {
+                        img.Dispose();
+                    }
+                }
+            }
+
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                var renderer = new LabelPreviewRenderer(configService);
+                AssertValidAndDispose(renderer.RenderExamplePreviews(LabelTemplateProfile.Molecule), "molecule");
+
+                // Also verify invalid/corrupt .lbx file triggers b-PAC fallback cleanly without throwing.
+                Directory.CreateDirectory(configService.TemplatesDirectoryPath);
+                string corruptTemplate = configService.GetTemplateFilePath(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Generic);
+                File.WriteAllText(corruptTemplate, "not a valid brother lbx file");
+
+                AssertValidAndDispose(renderer.RenderExamplePreviews(LabelTemplateProfile.Generic), "generic");
+            });
         }
 
         private static void WithTempDir(Action<string> action)
