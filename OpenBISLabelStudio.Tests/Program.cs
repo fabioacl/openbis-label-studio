@@ -31,6 +31,8 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
                 (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
                 (nameof(SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards), SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards),
+                (nameof(SetupSettingsFormTrySaveSettingsOfflineReturnsErrorWhenDiskSaveFails), SetupSettingsFormTrySaveSettingsOfflineReturnsErrorWhenDiskSaveFails),
+                (nameof(Form1CredentialsChangedSinceRequestDetectsUrlAndTokenChanges), Form1CredentialsChangedSinceRequestDetectsUrlAndTokenChanges),
                 (nameof(Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks), Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks),
                 (nameof(Form1HasSettingsButtonWithoutOverlaps), Form1HasSettingsButtonWithoutOverlaps),
                 (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges),
@@ -570,6 +572,8 @@ namespace OpenBISLabelStudio.Tests
 
                 AssertEqual("https://openbis.example.org", txtUrl.Text, "Saved URL must be pre-filled");
                 AssertEqual("", txtToken.Text, "Token field must be cleared in ExpiredTokenRecovery mode");
+                AssertFalse(txtUrl.ReadOnly, "Instance URL textbox must not be ReadOnly before async validation");
+                AssertFalse(txtToken.ReadOnly, "Token textbox must not be ReadOnly before async validation");
                 AssertTrue(lblStatus.Text.Contains("Token expired", StringComparison.OrdinalIgnoreCase),
                     $"Expected inline warning to show initial warning, actual: {lblStatus.Text}");
                 AssertTrue(ReferenceEquals(form.ActiveControl, txtToken), "Token textbox must be ActiveControl for immediate replacement");
@@ -695,6 +699,110 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual("Printer Y", savedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
                 AssertEqual("Printer Z", savedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
             });
+        }
+
+        private static void SetupSettingsFormTrySaveSettingsOfflineReturnsErrorWhenDiskSaveFails()
+        {
+            string tempFile = Path.Combine(Path.GetTempPath(), $"OpenBISLabelStudioFileBase_{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(tempFile, "blocking directory creation");
+
+            try
+            {
+                var configService = new AppConfigService(tempFile);
+                var offlineClient = new OpenBisClient(Path.GetTempPath(), "nonexistent-python-binary-xyz");
+                var renderer = new LabelPreviewRenderer(configService);
+
+                using var form = new SetupSettingsForm(
+                    configService,
+                    offlineClient,
+                    renderer,
+                    SetupDialogMode.Settings,
+                    installedPrintersProvider: () => new[] { "Printer A" });
+
+                var txtUrl = FindControl<TextBox>(form, "txtInstanceUrl");
+                var txtToken = FindControl<TextBox>(form, "txtToken");
+                AssertFalse(txtUrl.ReadOnly, "Instance URL textbox must start writable");
+                AssertFalse(txtToken.ReadOnly, "Token textbox must start writable");
+
+                txtUrl.Text = "https://openbis.example.org";
+                txtToken.Text = "tok-123";
+                form.ApplyServerTypes(new[]
+                {
+                    new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" }
+                });
+                var grid = FindControl<DataGridView>(form, "dgvObjectTypes");
+                grid.Rows[0].Cells[0].Value = true;
+
+                bool saved = form.TrySaveSettingsOffline(out string diskError);
+                AssertFalse(saved, "TrySaveSettingsOffline must return false when config directory creation fails");
+                AssertTrue(!string.IsNullOrWhiteSpace(diskError), "TrySaveSettingsOffline must return a non-empty inline error on disk failure");
+                AssertTrue(diskError.Contains("Could not save configuration files", StringComparison.OrdinalIgnoreCase),
+                    $"Expected clear save error prefix, actual: {diskError}");
+
+                ShowOffscreen(form);
+                FindControl<Button>(form, "btnNextFinish").PerformClick();
+                var lblFooterError = FindControl<Label>(form, "lblFooterError");
+                AssertTrue(form.Visible, "Settings form must remain open when disk save fails");
+                AssertFalse(form.DialogResult == DialogResult.OK, "DialogResult must not be OK when disk save fails");
+                AssertTrue(lblFooterError.Visible && lblFooterError.Text.Contains("Could not save configuration files", StringComparison.OrdinalIgnoreCase),
+                    $"Expected visible footer error on save failure, actual: {lblFooterError.Text}");
+            }
+            finally
+            {
+                if (File.Exists(tempFile))
+                {
+                    File.Delete(tempFile);
+                }
+            }
+        }
+
+        private static void Form1CredentialsChangedSinceRequestDetectsUrlAndTokenChanges()
+        {
+            AssertFalse(
+                Form1.CredentialsChangedSinceRequest("https://openbis.example.org", "tok-1", null),
+                "Null currentConfig must return false");
+
+            AssertFalse(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://other.example.org", Token = "" }),
+                "Empty token in currentConfig must return false");
+
+            AssertFalse(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://other.example.org", Token = "   " }),
+                "Whitespace token in currentConfig must return false");
+
+            AssertFalse(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok-1" }),
+                "Matching URL and token must return false");
+
+            AssertTrue(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok-2" }),
+                "Updated token must return true");
+
+            AssertTrue(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://updated.example.org", Token = "tok-1" }),
+                "Updated URL with non-empty token must return true");
+
+            AssertTrue(
+                Form1.CredentialsChangedSinceRequest(
+                    "https://openbis.example.org",
+                    "tok-1",
+                    new AppConfig { OpenBisUrl = "https://updated.example.org", Token = "tok-2" }),
+                "Updated URL and token must return true");
         }
 
         private static void Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks()
@@ -871,7 +979,14 @@ namespace OpenBISLabelStudio.Tests
                     AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Zero-printer fallback should preserve FlaskPrinter");
                 }
 
-                // 2. Verify initial population respects _isPopulatingPrinters and manual selection immediately persists.
+                // 2. Verify initial mismatch does not overwrite disk during startup population, and manual selection immediately persists.
+                configService.SavePrinterConfig(new PrinterConfig
+                {
+                    SmallBoxPrinter = "Missing Printer",
+                    MagnetPrinter = "Printer B",
+                    FlaskPrinter = "Printer C"
+                });
+
                 using (var form = new Form1(
                     configService,
                     offlineClient,
@@ -884,9 +999,11 @@ namespace OpenBISLabelStudio.Tests
                     var cmbMagnet = FindControl<ComboBox>(form, "magnetPrinterComboBox");
                     var cmbFlask = FindControl<ComboBox>(form, "flaskPrinterComboBox");
 
-                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Initial SmallBoxPrinter selection mismatch");
+                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Initial SmallBoxPrinter fallback selection mismatch");
                     AssertEqual("Printer B", cmbMagnet.SelectedItem?.ToString(), "Initial MagnetPrinter selection mismatch");
                     AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Initial FlaskPrinter selection mismatch");
+                    AssertEqual("Missing Printer", configService.LoadPrinterConfig()!.SmallBoxPrinter,
+                        "Startup printer fallback must not overwrite config/printers_config.json before manual selection");
 
                     cmbBox.SelectedIndex = 1;    // Printer B
                     cmbMagnet.SelectedIndex = 2; // Printer C

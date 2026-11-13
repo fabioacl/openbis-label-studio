@@ -24,9 +24,15 @@ namespace OpenBISLabelStudio
             }
 
             base.Dispose(disposing);
+
+            if (disposing)
+            {
+                DisposeOwnedFonts();
+            }
         }
 
         partial void DisposePreviewCache();
+        partial void DisposeOwnedFonts();
 
         #region Windows Form Designer generated code
 
@@ -717,6 +723,7 @@ namespace OpenBISLabelStudio
             cmbSmallBoxPrinter.Name = "cmbSmallBoxPrinter";
             cmbSmallBoxPrinter.Size = new Size(868, 28);
             cmbSmallBoxPrinter.TabIndex = 4;
+            cmbSmallBoxPrinter.SelectedIndexChanged += PrinterCombo_SelectedIndexChanged;
 
             // 
             // lblMagnetPrinter
@@ -738,6 +745,7 @@ namespace OpenBISLabelStudio
             cmbMagnetPrinter.Name = "cmbMagnetPrinter";
             cmbMagnetPrinter.Size = new Size(868, 28);
             cmbMagnetPrinter.TabIndex = 6;
+            cmbMagnetPrinter.SelectedIndexChanged += PrinterCombo_SelectedIndexChanged;
 
             // 
             // lblFlaskPrinter
@@ -759,6 +767,7 @@ namespace OpenBISLabelStudio
             cmbFlaskPrinter.Name = "cmbFlaskPrinter";
             cmbFlaskPrinter.Size = new Size(868, 28);
             cmbFlaskPrinter.TabIndex = 8;
+            cmbFlaskPrinter.SelectedIndexChanged += PrinterCombo_SelectedIndexChanged;
 
             // 
             // SetupSettingsForm

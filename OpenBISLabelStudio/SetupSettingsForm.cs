@@ -51,6 +51,8 @@ namespace OpenBISLabelStudio
         private bool _hasVisitedTypesPage;
         private bool _cameFromPrintersStep;
         private bool _autoFetchAttemptedForCurrentInputs;
+        private bool _resourcesDisposed;
+        private bool _fontsDisposed;
         private string _validatedUrl = "";
         private string _validatedToken = "";
 
@@ -240,9 +242,15 @@ namespace OpenBISLabelStudio
             }
 
             RefreshObjectTypeGrid();
+            Models.LabelTemplateProfile selectedProfile = GetSelectedOrDefaultPreviewProfile();
             if (IsHandleCreated && _currentStep == Models.SetupWizardStep.ObjectTypes)
             {
-                ShowExamplePreviews(GetSelectedOrDefaultPreviewProfile());
+                ShowExamplePreviews(selectedProfile);
+            }
+            else
+            {
+                _activePreviewProfile = selectedProfile;
+                UpdatePreviewToggleVisuals();
             }
         }
 
@@ -269,16 +277,16 @@ namespace OpenBISLabelStudio
 
             Models.PrinterConfig printerConfig = BuildPrinterConfigFromSelections();
 
-            _configService.SaveAppConfig(new Models.AppConfig
+            return TryPersistConfig(() =>
             {
-                OpenBisUrl = url,
-                Token = token
-            });
-            _configService.SaveConfiguredTypes(selectedTypes);
-            _configService.SavePrinterConfig(printerConfig);
-
-            validationError = "";
-            return true;
+                _configService.SaveAppConfig(new Models.AppConfig
+                {
+                    OpenBisUrl = url,
+                    Token = token
+                });
+                _configService.SaveConfiguredTypes(selectedTypes);
+                _configService.SavePrinterConfig(printerConfig);
+            }, out validationError);
         }
 
         protected override void OnShown(EventArgs e)
@@ -304,9 +312,16 @@ namespace OpenBISLabelStudio
 
         partial void DisposePreviewCache()
         {
-            if (picPreviewSmallBox != null) picPreviewSmallBox.Image = null;
-            if (picPreviewMagnet != null) picPreviewMagnet.Image = null;
-            if (picPreviewFlask != null) picPreviewFlask.Image = null;
+            if (_resourcesDisposed)
+            {
+                return;
+            }
+
+            _resourcesDisposed = true;
+
+            if (picPreviewSmallBox != null && !picPreviewSmallBox.IsDisposed) picPreviewSmallBox.Image = null;
+            if (picPreviewMagnet != null && !picPreviewMagnet.IsDisposed) picPreviewMagnet.Image = null;
+            if (picPreviewFlask != null && !picPreviewFlask.IsDisposed) picPreviewFlask.Image = null;
 
             foreach (Dictionary<Models.LabelTemplateType, Image> slotMap in _previewCache.Values)
             {
@@ -317,6 +332,16 @@ namespace OpenBISLabelStudio
             }
 
             _previewCache.Clear();
+        }
+
+        partial void DisposeOwnedFonts()
+        {
+            if (_fontsDisposed)
+            {
+                return;
+            }
+
+            _fontsDisposed = true;
             _tabRegularFont.Dispose();
             _tabBoldFont.Dispose();
             _previewRegularFont.Dispose();
@@ -336,35 +361,35 @@ namespace OpenBISLabelStudio
                 txtToken.Text = Mode == SetupDialogMode.ExpiredTokenRecovery
                     ? ""
                     : (savedApp?.Token ?? "");
+
+                _masterTypeRows.Clear();
+                foreach (Models.ConfiguredOpenBisType savedType in savedTypes)
+                {
+                    if (string.IsNullOrWhiteSpace(savedType.Code))
+                    {
+                        continue;
+                    }
+
+                    _masterTypeRows.Add(new TypeRowEntry
+                    {
+                        IsSelected = true,
+                        Code = savedType.Code.Trim(),
+                        DisplayName = string.IsNullOrWhiteSpace(savedType.DisplayName)
+                            ? AppConfigService.FormatFriendlyName(savedType.Code)
+                            : savedType.DisplayName.Trim(),
+                        TemplateProfile = Enum.IsDefined(typeof(Models.LabelTemplateProfile), savedType.TemplateProfile)
+                            ? savedType.TemplateProfile
+                            : GetDefaultProfileForCode(savedType.Code)
+                    });
+                }
+
+                RefreshObjectTypeGrid();
+                PopulatePrinterCombos(savedPrinters);
             }
             finally
             {
                 _isInitializingInputs = false;
             }
-
-            _masterTypeRows.Clear();
-            foreach (Models.ConfiguredOpenBisType savedType in savedTypes)
-            {
-                if (string.IsNullOrWhiteSpace(savedType.Code))
-                {
-                    continue;
-                }
-
-                _masterTypeRows.Add(new TypeRowEntry
-                {
-                    IsSelected = true,
-                    Code = savedType.Code.Trim(),
-                    DisplayName = string.IsNullOrWhiteSpace(savedType.DisplayName)
-                        ? AppConfigService.FormatFriendlyName(savedType.Code)
-                        : savedType.DisplayName.Trim(),
-                    TemplateProfile = Enum.IsDefined(typeof(Models.LabelTemplateProfile), savedType.TemplateProfile)
-                        ? savedType.TemplateProfile
-                        : GetDefaultProfileForCode(savedType.Code)
-                });
-            }
-
-            RefreshObjectTypeGrid();
-            PopulatePrinterCombos(savedPrinters);
 
             Models.SetupWizardStep initialStep = Mode == SetupDialogMode.ExpiredTokenRecovery
                 ? Models.SetupWizardStep.Connection
@@ -441,7 +466,7 @@ namespace OpenBISLabelStudio
             }
 
             _currentStep = step;
-            lblFooterError.Text = "";
+            ClearFooterError();
 
             pnlConnection.Visible = step == Models.SetupWizardStep.Connection;
             pnlObjectTypes.Visible = step == Models.SetupWizardStep.ObjectTypes;
@@ -795,8 +820,28 @@ namespace OpenBISLabelStudio
                    && string.Equals(_validatedToken, token, StringComparison.Ordinal);
         }
 
+        private bool TryPersistConfig(Action saveAction, out string errorMessage)
+        {
+            try
+            {
+                saveAction();
+                errorMessage = "";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"Could not save configuration files: {ex.Message}";
+                return false;
+            }
+        }
+
         private async Task<Models.OpenBisTypesResult?> RunLiveConnectionCheckAsync(bool saveCredentialsOnSuccess)
         {
+            if (_isBusy)
+            {
+                return null;
+            }
+
             if (!ValidateConnectionInputs(out string url, out string token, out string inputError))
             {
                 SetConnectionStatus(inputError, StatusSeverity.Error);
@@ -835,13 +880,16 @@ namespace OpenBISLabelStudio
 
                 ApplyServerTypes(result.Types);
 
-                if (saveCredentialsOnSuccess)
+                if (saveCredentialsOnSuccess && !TryPersistConfig(
+                        () => _configService.SaveAppConfig(new Models.AppConfig
+                        {
+                            OpenBisUrl = url,
+                            Token = token
+                        }),
+                        out string saveError))
                 {
-                    _configService.SaveAppConfig(new Models.AppConfig
-                    {
-                        OpenBisUrl = url,
-                        Token = token
-                    });
+                    SetConnectionStatus(saveError, StatusSeverity.Error);
+                    return null;
                 }
 
                 string suffix = saveCredentialsOnSuccess ? " Credentials saved." : "";
@@ -849,6 +897,15 @@ namespace OpenBISLabelStudio
                     $"Connected successfully ({result.Types.Count} object type(s) found).{suffix}",
                     StatusSeverity.Success);
                 return result;
+            }
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing)
+                {
+                    SetConnectionStatus($"Unexpected error while checking openBIS connection: {ex.Message}", StatusSeverity.Error);
+                }
+
+                return null;
             }
             finally
             {
@@ -916,6 +973,18 @@ namespace OpenBISLabelStudio
                 ApplyServerTypes(result.Types);
                 SetTypesStatus($"Loaded {result.Types.Count} object type(s) from openBIS.", StatusSeverity.Success);
             }
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing)
+                {
+                    string message = $"Offline mode: showing saved object types ({ex.Message})";
+                    SetTypesStatus(message, StatusSeverity.Warning);
+                    if (_currentStep == Models.SetupWizardStep.Connection)
+                    {
+                        SetConnectionStatus(message, StatusSeverity.Warning);
+                    }
+                }
+            }
             finally
             {
                 if (!IsDisposed && !Disposing)
@@ -950,6 +1019,8 @@ namespace OpenBISLabelStudio
         {
             _isBusy = busy;
             UseWaitCursor = busy;
+            txtInstanceUrl.ReadOnly = busy;
+            txtToken.ReadOnly = busy;
             btnTestConnection.Enabled = !busy;
             btnNextFinish.Enabled = !busy;
             btnRefreshTypes.Enabled = !busy;
@@ -979,6 +1050,17 @@ namespace OpenBISLabelStudio
             lblTypesStatus.ForeColor = SeverityToColor(severity);
         }
 
+        private void ShowFooterError(string message)
+        {
+            lblFooterError.Text = message;
+            lblFooterError.Visible = true;
+        }
+
+        private void ClearFooterError()
+        {
+            lblFooterError.Text = "";
+        }
+
         private static Color SeverityToColor(StatusSeverity severity)
         {
             return severity switch
@@ -997,6 +1079,7 @@ namespace OpenBISLabelStudio
                 return;
             }
 
+            ClearFooterError();
             _validatedUrl = "";
             _validatedToken = "";
             _autoFetchAttemptedForCurrentInputs = false;
@@ -1010,6 +1093,11 @@ namespace OpenBISLabelStudio
 
         private async void btnTestConnection_Click(object? sender, EventArgs e)
         {
+            if (_isBusy)
+            {
+                return;
+            }
+
             bool saveOnSuccess = Mode == SetupDialogMode.Wizard || Mode == SetupDialogMode.ExpiredTokenRecovery;
             await RunLiveConnectionCheckAsync(saveCredentialsOnSuccess: saveOnSuccess);
         }
@@ -1035,13 +1123,24 @@ namespace OpenBISLabelStudio
                         ShowStep(Models.SetupWizardStep.ObjectTypes);
                         SetTypesStatus(validationError, StatusSeverity.Error);
                     }
+                    else if (validationError.StartsWith("Could not save configuration files:", StringComparison.Ordinal))
+                    {
+                        if (_currentStep == Models.SetupWizardStep.Connection)
+                        {
+                            SetConnectionStatus(validationError, StatusSeverity.Error);
+                        }
+                        else if (_currentStep == Models.SetupWizardStep.ObjectTypes)
+                        {
+                            SetTypesStatus(validationError, StatusSeverity.Error);
+                        }
+                    }
                     else
                     {
                         ShowStep(Models.SetupWizardStep.Connection);
                         SetConnectionStatus(validationError, StatusSeverity.Error);
                     }
 
-                    lblFooterError.Text = validationError;
+                    ShowFooterError(validationError);
                 }
 
                 return;
@@ -1060,11 +1159,18 @@ namespace OpenBISLabelStudio
         {
             if (IsValidatedForCurrentInputs())
             {
-                _configService.SaveAppConfig(new Models.AppConfig
+                if (!TryPersistConfig(
+                        () => _configService.SaveAppConfig(new Models.AppConfig
+                        {
+                            OpenBisUrl = txtInstanceUrl.Text.Trim(),
+                            Token = txtToken.Text.Trim()
+                        }),
+                        out string saveError))
                 {
-                    OpenBisUrl = txtInstanceUrl.Text.Trim(),
-                    Token = txtToken.Text.Trim()
-                });
+                    SetConnectionStatus(saveError, StatusSeverity.Error);
+                    return;
+                }
+
                 DialogResult = DialogResult.OK;
                 Close();
                 return;
@@ -1096,11 +1202,17 @@ namespace OpenBISLabelStudio
                     }
                     else
                     {
-                        _configService.SaveAppConfig(new Models.AppConfig
+                        if (!TryPersistConfig(
+                                () => _configService.SaveAppConfig(new Models.AppConfig
+                                {
+                                    OpenBisUrl = txtInstanceUrl.Text.Trim(),
+                                    Token = txtToken.Text.Trim()
+                                }),
+                                out string saveError))
                         {
-                            OpenBisUrl = txtInstanceUrl.Text.Trim(),
-                            Token = txtToken.Text.Trim()
-                        });
+                            SetConnectionStatus(saveError, StatusSeverity.Error);
+                            return;
+                        }
                     }
 
                     bool hasTypes = _configService.HasValidConfiguredTypes();
@@ -1134,7 +1246,12 @@ namespace OpenBISLabelStudio
 
                     if (_configService.HasPrinterConfig() && !_cameFromPrintersStep)
                     {
-                        _configService.SaveConfiguredTypes(selectedTypes);
+                        if (!TryPersistConfig(() => _configService.SaveConfiguredTypes(selectedTypes), out string saveError))
+                        {
+                            SetTypesStatus(saveError, StatusSeverity.Error);
+                            return;
+                        }
+
                         DialogResult = DialogResult.OK;
                         Close();
                         return;
@@ -1158,10 +1275,19 @@ namespace OpenBISLabelStudio
                             return;
                         }
 
-                        _configService.SaveConfiguredTypes(selectedTypes);
+                        if (!TryPersistConfig(() => _configService.SaveConfiguredTypes(selectedTypes), out string typesSaveError))
+                        {
+                            ShowFooterError(typesSaveError);
+                            return;
+                        }
                     }
 
-                    _configService.SavePrinterConfig(BuildPrinterConfigFromSelections());
+                    if (!TryPersistConfig(() => _configService.SavePrinterConfig(BuildPrinterConfigFromSelections()), out string printerSaveError))
+                    {
+                        ShowFooterError(printerSaveError);
+                        return;
+                    }
+
                     DialogResult = DialogResult.OK;
                     Close();
                     break;
@@ -1229,7 +1355,22 @@ namespace OpenBISLabelStudio
 
         private async void btnRefreshTypes_Click(object? sender, EventArgs e)
         {
+            if (_isBusy)
+            {
+                return;
+            }
+
             await LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
+        }
+
+        private void PrinterCombo_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (_isInitializingInputs || Mode != SetupDialogMode.Settings)
+            {
+                return;
+            }
+
+            ClearFooterError();
         }
 
         private void txtTypeFilter_TextChanged(object? sender, EventArgs e)
@@ -1263,6 +1404,8 @@ namespace OpenBISLabelStudio
             {
                 return;
             }
+
+            ClearFooterError();
 
             if (e.ColumnIndex == colUse.Index)
             {

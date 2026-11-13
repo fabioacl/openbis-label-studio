@@ -107,6 +107,18 @@ namespace OpenBISLabelStudio
             return false;
         }
 
+        /// <summary>
+        /// Returns <c>true</c> when <paramref name="currentConfig"/> holds a non-empty token and either
+        /// its URL or token changed compared to the credentials captured for an in-flight request.
+        /// </summary>
+        public static bool CredentialsChangedSinceRequest(string? requestUrl, string? requestToken, AppConfig? currentConfig)
+        {
+            return currentConfig != null
+                   && !string.IsNullOrWhiteSpace(currentConfig.Token)
+                   && (!string.Equals(currentConfig.Token, requestToken, StringComparison.Ordinal)
+                       || !string.Equals(currentConfig.OpenBisUrl, requestUrl, StringComparison.Ordinal));
+        }
+
         partial void DisposeManagedResources()
         {
             SetPictureBoxImage(smallBoxLabelPreview, null);
@@ -352,58 +364,31 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            OpenBisTypesResult result = await _openBisClient.QueryTypesAsync(_config.OpenBisUrl, _config.Token);
-            if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
+            (bool shouldProceed, bool attemptedRecovery, OpenBisTypesResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
+                (url, token) => _openBisClient.QueryTypesAsync(url, token),
+                r => r.Success,
+                r => r.ErrorType,
+                r => r.Error,
+                () => requestVersion != _typeRefreshRequestVersion,
+                "openBIS token expired or invalid — showing cached object types. Click Settings... to update credentials.");
+
+            if (!shouldProceed || result == null)
             {
                 return;
             }
 
             if (!result.Success)
             {
-                if (string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (await TryRecoverExpiredTokenAsync(result.Error))
-                    {
-                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
-                        {
-                            return;
-                        }
-
-                        result = await _openBisClient.QueryTypesAsync(_config.OpenBisUrl, _config.Token);
-                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
-                        {
-                            return;
-                        }
-
-                        if (!result.Success)
-                        {
-                            string retryErr = FormatOpenBisError(result.Error, "Could not refresh openBIS object types.");
-                            ShowStatusNotice($"Offline mode: showing cached object types ({retryErr})", retryErr);
-                            return;
-                        }
-                    }
-                    else
-                    {
-                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
-                        {
-                            return;
-                        }
-
-                        ShowStatusNotice(
-                            "openBIS token expired or invalid — showing cached object types. Click Settings... to update credentials.",
-                            result.Error);
-                        return;
-                    }
-                }
-                else
-                {
-                    string errDetail = FormatOpenBisError(result.Error, "Could not connect to openBIS.");
-                    string banner = string.Equals(result.ErrorType, "connection_error", StringComparison.OrdinalIgnoreCase)
+                string errDetail = FormatOpenBisError(result.Error, attemptedRecovery
+                    ? "Could not refresh openBIS object types."
+                    : "Could not connect to openBIS.");
+                string banner = attemptedRecovery
+                    ? $"Offline mode: showing cached object types ({errDetail})"
+                    : string.Equals(result.ErrorType, "connection_error", StringComparison.OrdinalIgnoreCase)
                         ? $"Offline mode: could not reach openBIS — showing cached object types. ({errDetail})"
                         : $"Notice: could not refresh openBIS object types — showing cached object types. ({errDetail})";
-                    ShowStatusNotice(banner, errDetail);
-                    return;
-                }
+                ShowStatusNotice(banner, errDetail);
+                return;
             }
 
             ClearStatusNotice();
@@ -411,6 +396,72 @@ namespace OpenBISLabelStudio
             {
                 ApplyServerTypeDescriptions(result.Types);
             }
+        }
+
+        private async Task<(bool ShouldProceed, bool AttemptedRecovery, TResult? Result)> ExecuteWithExpiredTokenRecoveryAsync<TResult>(
+            Func<string, string, Task<TResult>> queryAsync,
+            Func<TResult, bool> isSuccess,
+            Func<TResult, string?> getErrorType,
+            Func<TResult, string?> getError,
+            Func<bool> isVersionStale,
+            string cancelledStatusNotice)
+        {
+            bool IsStale() => IsDisposed || Disposing || isVersionStale();
+
+            string requestUrl = _config.OpenBisUrl;
+            string requestToken = _config.Token;
+
+            TResult result = await queryAsync(requestUrl, requestToken);
+            if (IsStale())
+            {
+                return (false, false, default);
+            }
+
+            if (!isSuccess(result) && IsTokenExpiredError(getErrorType(result))
+                && CredentialsChangedSinceRequest(requestUrl, requestToken, _config))
+            {
+                requestUrl = _config.OpenBisUrl;
+                requestToken = _config.Token;
+                result = await queryAsync(requestUrl, requestToken);
+                if (IsStale())
+                {
+                    return (false, false, default);
+                }
+            }
+
+            bool attemptedRecovery = false;
+            if (!isSuccess(result) && IsTokenExpiredError(getErrorType(result)))
+            {
+                attemptedRecovery = true;
+                string? expiredError = getError(result);
+                if (!await TryRecoverExpiredTokenAsync(expiredError))
+                {
+                    if (!IsStale())
+                    {
+                        ShowStatusNotice(cancelledStatusNotice, expiredError);
+                    }
+
+                    return (false, true, default);
+                }
+
+                if (IsStale())
+                {
+                    return (false, true, default);
+                }
+
+                result = await queryAsync(_config.OpenBisUrl, _config.Token);
+                if (IsStale())
+                {
+                    return (false, true, default);
+                }
+            }
+
+            return (true, attemptedRecovery, result);
+        }
+
+        private static bool IsTokenExpiredError(string? errorType)
+        {
+            return string.Equals(errorType, "token_expired", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ApplyServerTypeDescriptions(IReadOnlyList<OpenBisTypeInfoDto> serverTypes)
@@ -555,6 +606,9 @@ namespace OpenBISLabelStudio
             ++_sampleDetailsRequestVersion;
             _currentSelectedTypeCode = selectedItem.Code;
             selectedOpenbisTypeLabel.Text = $"{selectedItem.DisplayText}:";
+            openbisObjectsComboBox.Items.Clear();
+            _loadedSamples.Clear();
+            ClearAllPreviews();
             UpdateFreeTextControlsState();
 
             if (string.IsNullOrWhiteSpace(_config.OpenBisUrl))
@@ -563,48 +617,22 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            openbisObjectsComboBox.Items.Clear();
-            _loadedSamples.Clear();
-            ClearAllPreviews();
-
             SetControlsEnabled(false);
             Cursor = Cursors.WaitCursor;
 
             try
             {
-                OpenBisListResult result = await _openBisClient.QuerySamplesByTypeAsync(
-                    _config.OpenBisUrl,
-                    _config.Token,
-                    selectedItem.Code);
+                (bool shouldProceed, _, OpenBisListResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
+                    (url, token) => _openBisClient.QuerySamplesByTypeAsync(url, token, selectedItem.Code),
+                    r => r.Success,
+                    r => r.ErrorType,
+                    r => r.Error,
+                    () => requestVersion != _typeSelectionRequestVersion,
+                    "openBIS token expired or invalid — click Settings... to update credentials.");
 
-                if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
+                if (!shouldProceed || result == null)
                 {
                     return;
-                }
-
-                if (!result.Success && string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (await TryRecoverExpiredTokenAsync(result.Error))
-                    {
-                        if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
-                        {
-                            return;
-                        }
-
-                        result = await _openBisClient.QuerySamplesByTypeAsync(
-                            _config.OpenBisUrl,
-                            _config.Token,
-                            selectedItem.Code);
-
-                        if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
-                        {
-                            return;
-                        }
-                    }
-                    else if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
-                    {
-                        return;
-                    }
                 }
 
                 if (result.Success && result.Data != null)
@@ -660,39 +688,17 @@ namespace OpenBISLabelStudio
 
             try
             {
-                OpenBisDetailsResult result = await _openBisClient.QuerySampleDetailsAsync(
-                    _config.OpenBisUrl,
-                    _config.Token,
-                    selectedSample.PermId);
+                (bool shouldProceed, _, OpenBisDetailsResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
+                    (url, token) => _openBisClient.QuerySampleDetailsAsync(url, token, selectedSample.PermId),
+                    r => r.Success,
+                    r => r.ErrorType,
+                    r => r.Error,
+                    () => requestVersion != _sampleDetailsRequestVersion,
+                    "openBIS token expired or invalid — click Settings... to update credentials.");
 
-                if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
+                if (!shouldProceed || result == null)
                 {
                     return;
-                }
-
-                if (!result.Success && string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (await TryRecoverExpiredTokenAsync(result.Error))
-                    {
-                        if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
-                        {
-                            return;
-                        }
-
-                        result = await _openBisClient.QuerySampleDetailsAsync(
-                            _config.OpenBisUrl,
-                            _config.Token,
-                            selectedSample.PermId);
-
-                        if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
-                        {
-                            return;
-                        }
-                    }
-                    else if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
-                    {
-                        return;
-                    }
                 }
 
                 if (result.Success && result.Details != null)
