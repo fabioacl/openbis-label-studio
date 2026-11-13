@@ -2,20 +2,83 @@ import sys
 import json
 import os
 import re
+import socket
 import tempfile
 import urllib3
+import requests
 from pybis import Openbis
 
 # Disable insecure HTTPS warnings if self-signed certs are used
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 RESULTS_FILE = "openbis_results.json"
-PRECURSORS_COLLECTION = "/LAB205_MATERIALS/MOLECULES/PRECURSOR_COLLECTION"
+
+
+class InvalidTokenError(Exception):
+    """Raised when an openBIS token is empty, invalid, or expired."""
+    pass
+
+
+def classify_error(exc: Exception) -> str:
+    """
+    Classifies an exception into:
+      - 'token_expired'
+      - 'connection_error'
+      - 'unknown_error'
+    """
+    if isinstance(exc, InvalidTokenError):
+        return "token_expired"
+
+    if isinstance(exc, (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, socket.error)):
+        response = getattr(exc, "response", None)
+        if response is not None and getattr(response, "status_code", None) in (401, 403):
+            return "token_expired"
+        return "connection_error"
+
+    msg = str(exc).lower()
+
+    if isinstance(exc, ValueError):
+        if any(w in msg for w in ("url", "hostname", "https")):
+            return "connection_error"
+        if re.search(r'\b(session|token|valid|expired|login)\b', msg) or "invalid session" in msg or "no longer valid" in msg:
+            return "token_expired"
+
+    # Keywords in error message for general exceptions
+    token_keywords = [
+        "401", "403", "unauthorized", "authentication", "invalid session",
+        "session expired", "token expired", "token is empty", "token invalid",
+        "invalid token", "no longer valid"
+    ]
+    if any(k in msg for k in token_keywords) or re.search(r'\b(token|session|unauthorized)\b', msg):
+        return "token_expired"
+
+    conn_keywords = [
+        "connection", "timeout", "timed out", "ssl", "name resolution",
+        "getaddrinfo", "unreachable", "refused", "reset", "dns",
+        "network", "https", "hostname"
+    ]
+    if any(k in msg for k in conn_keywords):
+        return "connection_error"
+
+    return "unknown_error"
+
 
 def create_openbis_connection(openbis_url, token):
+    if not token or not str(token).strip():
+        raise InvalidTokenError("Personal access token is empty.")
+
     o = Openbis(openbis_url, verify_certificates=False)
-    o.set_token(token)
+    try:
+        o.set_token(token, save_token=False)
+    except TypeError:
+        # Fallback for pybis versions where save_token argument is not accepted
+        o.set_token(token)
+
+    if not o.is_session_active():
+        raise InvalidTokenError("Session token is expired or invalid.")
+
     return o
+
 
 def extract_evaporation_temperature(spreadsheet):
     """
@@ -59,6 +122,7 @@ def extract_evaporation_temperature(spreadsheet):
 
     return ""
 
+
 def fetch_sample_types(openbis_url, token):
     try:
         o = create_openbis_connection(openbis_url, token)
@@ -76,7 +140,8 @@ def fetch_sample_types(openbis_url, token):
             })
         return {"success": True, "types": type_list}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "errorType": classify_error(e), "error": str(e)}
+
 
 def fetch_samples_by_type(openbis_url, token, sample_type):
     try:
@@ -115,7 +180,8 @@ def fetch_samples_by_type(openbis_url, token, sample_type):
         return {"success": True, "data": result_list}
 
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "errorType": classify_error(e), "error": str(e)}
+
 
 def fetch_sample_details(openbis_url, token, perm_id):
     try:
@@ -255,27 +321,103 @@ def fetch_sample_details(openbis_url, token, perm_id):
         return {"success": True, "details": details}
 
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "errorType": classify_error(e), "error": str(e)}
+
+
+def parse_cli_args(argv: list[str]) -> tuple[str, str, str, str | None, str]:
+    """
+    Parses CLI arguments.
+    Usage:
+      python openbis_fetch.py <url> <token> (--types | <sample_type> | --details <perm_id>) [--out <json_path>]
+    Returns:
+      (url, token, mode_or_type, perm_id, out_path)
+    """
+    args = list(argv)
+    if args and (args[0].endswith(".py") or args[0] in ("python", "python3") or args[0].endswith("python.exe")):
+        args = args[1:]
+
+    out_path = RESULTS_FILE
+    if "--out" in args:
+        idx = args.index("--out")
+        if idx + 1 >= len(args):
+            raise ValueError("Missing path for --out argument.")
+        out_path = args[idx + 1]
+        del args[idx:idx + 2]
+
+    if len(args) < 3:
+        raise ValueError("Invalid arguments provided to Python script.")
+
+    url = args[0]
+    token = args[1]
+    mode_or_type = args[2]
+
+    perm_id = None
+    if mode_or_type == "--details":
+        if len(args) < 4:
+            raise ValueError("Missing perm_id for --details.")
+        perm_id = args[3]
+
+    return url, token, mode_or_type, perm_id, out_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    """
+    Main entry point for CLI execution. Writes JSON results to out_path and returns exit code:
+      - 0 on successful fetch execution (even if openBIS returns an error object)
+      - 1 on malformed arguments or unhandled script failure
+    """
+    if argv is None:
+        argv = sys.argv
+
+    # Detect --out early if present, so argument errors can be written to the requested path
+    out_path = RESULTS_FILE
+    if "--out" in argv:
+        try:
+            idx = argv.index("--out")
+            if idx + 1 < len(argv):
+                out_path = argv[idx + 1]
+        except Exception:
+            pass
+
+    try:
+        url, token, mode_or_type, perm_id, parsed_out_path = parse_cli_args(argv)
+        out_path = parsed_out_path
+    except Exception as e:
+        error_payload = {
+            "success": False,
+            "errorType": classify_error(e),
+            "error": str(e)
+        }
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(error_payload, f, indent=2)
+        except Exception:
+            pass
+        return 1
+
+    try:
+        if mode_or_type == "--types":
+            result = fetch_sample_types(url, token)
+        elif mode_or_type == "--details":
+            result = fetch_sample_details(url, token, perm_id)
+        else:
+            sample_type = mode_or_type
+            result = fetch_samples_by_type(url, token, sample_type)
+    except Exception as e:
+        result = {
+            "success": False,
+            "errorType": classify_error(e),
+            "error": str(e)
+        }
+
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+    except Exception:
+        return 1
+
+    return 0
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        error_payload = {"success": False, "error": "Invalid arguments provided to Python script."}
-        with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(error_payload, f, indent=2)
-        sys.exit(1)
-
-    url = sys.argv[1]
-    token = sys.argv[2]
-    mode_or_type = sys.argv[3]
-
-    if mode_or_type == "--types":
-        result = fetch_sample_types(url, token)
-    elif mode_or_type == "--details" and len(sys.argv) >= 5:
-        perm_id = sys.argv[4]
-        result = fetch_sample_details(url, token, perm_id)
-    else:
-        sample_type = mode_or_type
-        result = fetch_samples_by_type(url, token, sample_type)
-
-    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
+    sys.exit(main())
