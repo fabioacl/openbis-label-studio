@@ -33,7 +33,8 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards), SetupSettingsFormSettingsSavePersistsOfflineAndCancelDiscards),
                 (nameof(Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks), Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks),
                 (nameof(Form1HasSettingsButtonWithoutOverlaps), Form1HasSettingsButtonWithoutOverlaps),
-                (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges)
+                (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges),
+                (nameof(TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion), TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion)
             };
 
             int failures = 0;
@@ -898,6 +899,121 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual("Printer C", persisted.MagnetPrinter, "Auto-saved MagnetPrinter mismatch");
                 AssertEqual("Printer A", persisted.FlaskPrinter, "Auto-saved FlaskPrinter mismatch");
             });
+        }
+
+        private static void TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion()
+        {
+            static void WaitWithinTimeout(Task task, string timeoutMessage)
+            {
+                Task completed = Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult();
+                AssertTrue(ReferenceEquals(completed, task), timeoutMessage);
+            }
+
+            SynchronizationContext? previousContext = SynchronizationContext.Current;
+            WindowsFormsSynchronizationContext? ownedContext = null;
+            if (previousContext is not WindowsFormsSynchronizationContext)
+            {
+                ownedContext = new WindowsFormsSynchronizationContext();
+                SynchronizationContext.SetSynchronizationContext(ownedContext);
+            }
+
+            try
+            {
+                var coordinator = new TokenRecoveryCoordinator();
+                int promptCallCount = 0;
+
+                var firstPromptGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Task<bool> firstCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return firstPromptGate.Task;
+                });
+                Task<bool> secondCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return Task.FromResult(false);
+                });
+
+                AssertEqual(1, promptCallCount, "Concurrent token recovery should invoke prompt only once");
+                AssertTrue(ReferenceEquals(firstCall, secondCall), "Concurrent callers should share the active recovery task");
+
+                firstPromptGate.SetResult(true);
+                Task<bool[]> firstAll = Task.WhenAll(firstCall, secondCall);
+                WaitWithinTimeout(firstAll, "Timed out waiting for concurrent recovery success under WindowsFormsSynchronizationContext");
+                bool[] firstResults = firstAll.GetAwaiter().GetResult();
+                AssertTrue(firstResults[0] && firstResults[1], "Concurrent callers should receive shared success result");
+
+                var secondPromptGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Task<bool> thirdCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return secondPromptGate.Task;
+                });
+                Task<bool> fourthCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return Task.FromResult(true);
+                });
+
+                AssertEqual(2, promptCallCount, "Completed recovery should allow a new prompt invocation");
+                secondPromptGate.SetResult(false);
+                Task<bool[]> secondAll = Task.WhenAll(thirdCall, fourthCall);
+                WaitWithinTimeout(secondAll, "Timed out waiting for concurrent recovery cancellation");
+                bool[] secondResults = secondAll.GetAwaiter().GetResult();
+                AssertTrue(!secondResults[0] && !secondResults[1], "Concurrent callers should receive shared cancel result");
+
+                var failingPromptGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Task<bool> fifthCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return failingPromptGate.Task;
+                });
+                Task<bool> sixthCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return Task.FromResult(true);
+                });
+
+                AssertEqual(3, promptCallCount, "Cancelled recovery should reset in-flight state for subsequent prompts");
+                failingPromptGate.SetException(new InvalidOperationException("Dialog failed"));
+
+                Task faultedAll = Task.WhenAll(fifthCall, sixthCall);
+                WaitWithinTimeout(faultedAll, "Timed out waiting for faulted concurrent recovery calls");
+
+                foreach (Task<bool> call in new[] { fifthCall, sixthCall })
+                {
+                    bool observedFailure = false;
+                    try
+                    {
+                        call.GetAwaiter().GetResult();
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message == "Dialog failed")
+                    {
+                        observedFailure = true;
+                    }
+
+                    AssertTrue(observedFailure, "Concurrent callers should observe prompt exception");
+                }
+
+                Task<bool> seventhCall = coordinator.RecoverAsync(() =>
+                {
+                    promptCallCount++;
+                    return Task.FromResult(true);
+                });
+                WaitWithinTimeout(seventhCall, "Timed out waiting for recovery after fault");
+                bool seventhResult = seventhCall.GetAwaiter().GetResult();
+
+                AssertEqual(4, promptCallCount, "Faulted recovery should clear in-flight state for later callers");
+                AssertTrue(seventhResult, "Subsequent recovery after fault should succeed");
+            }
+            finally
+            {
+                if (ownedContext != null)
+                {
+                    SynchronizationContext.SetSynchronizationContext(previousContext);
+                    ownedContext.Dispose();
+                }
+            }
         }
 
         private static void ShowOffscreen(Form form)

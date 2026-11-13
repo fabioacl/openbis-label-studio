@@ -30,7 +30,8 @@ namespace OpenBISLabelStudio
         private string _currentSelectedTypeCode = "";
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
-        private bool _isRecoveringToken;
+        private readonly TokenRecoveryCoordinator _tokenRecoveryCoordinator = new TokenRecoveryCoordinator();
+        private long _typeRefreshRequestVersion;
         private long _typeSelectionRequestVersion;
         private long _sampleDetailsRequestVersion;
 
@@ -344,13 +345,15 @@ namespace OpenBISLabelStudio
 
         private async Task RefreshTypeDescriptionsFromServerAsync()
         {
+            long requestVersion = ++_typeRefreshRequestVersion;
+
             if (string.IsNullOrWhiteSpace(_config.OpenBisUrl) || string.IsNullOrWhiteSpace(_config.Token))
             {
                 return;
             }
 
             OpenBisTypesResult result = await _openBisClient.QueryTypesAsync(_config.OpenBisUrl, _config.Token);
-            if (IsDisposed || Disposing)
+            if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
             {
                 return;
             }
@@ -359,15 +362,15 @@ namespace OpenBISLabelStudio
             {
                 if (string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (TryRecoverExpiredToken(result.Error))
+                    if (await TryRecoverExpiredTokenAsync(result.Error))
                     {
-                        if (IsDisposed || Disposing)
+                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
                         {
                             return;
                         }
 
                         result = await _openBisClient.QueryTypesAsync(_config.OpenBisUrl, _config.Token);
-                        if (IsDisposed || Disposing)
+                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
                         {
                             return;
                         }
@@ -381,6 +384,11 @@ namespace OpenBISLabelStudio
                     }
                     else
                     {
+                        if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
+                        {
+                            return;
+                        }
+
                         ShowStatusNotice(
                             "openBIS token expired or invalid — showing cached object types. Click Settings... to update credentials.",
                             result.Error);
@@ -451,48 +459,50 @@ namespace OpenBISLabelStudio
             PopulateOpenBisTypeComboBox(_currentSelectedTypeCode);
         }
 
-        private bool TryRecoverExpiredToken(string? errorDetail)
+        private Task<bool> TryRecoverExpiredTokenAsync(string? errorDetail)
         {
-            if (IsDisposed || Disposing || _isRecoveringToken)
+            if (IsDisposed || Disposing)
+            {
+                return Task.FromResult(false);
+            }
+
+            return _tokenRecoveryCoordinator.RecoverAsync(() => Task.FromResult(ShowExpiredTokenRecoveryDialog(errorDetail)));
+        }
+
+        private bool ShowExpiredTokenRecoveryDialog(string? errorDetail)
+        {
+            if (IsDisposed || Disposing)
             {
                 return false;
             }
 
-            _isRecoveringToken = true;
-            try
+            string warning = string.IsNullOrWhiteSpace(errorDetail)
+                ? "Your openBIS personal access token has expired or is invalid. Please enter a new token."
+                : $"Your openBIS personal access token has expired or is invalid ({errorDetail.Trim()}). Please enter a new token.";
+
+            using var recoveryForm = new SetupSettingsForm(
+                _configService,
+                _openBisClient,
+                _previewRenderer,
+                SetupDialogMode.ExpiredTokenRecovery,
+                SetupWizardStep.Connection,
+                initialWarning: warning,
+                installedPrintersProvider: _installedPrintersProvider);
+
+            DialogResult result = recoveryForm.ShowDialog(this);
+            if (IsDisposed || Disposing || result != DialogResult.OK)
             {
-                string warning = string.IsNullOrWhiteSpace(errorDetail)
-                    ? "Your openBIS personal access token has expired or is invalid. Please enter a new token."
-                    : $"Your openBIS personal access token has expired or is invalid ({errorDetail.Trim()}). Please enter a new token.";
-
-                using var recoveryForm = new SetupSettingsForm(
-                    _configService,
-                    _openBisClient,
-                    _previewRenderer,
-                    SetupDialogMode.ExpiredTokenRecovery,
-                    SetupWizardStep.Connection,
-                    initialWarning: warning,
-                    installedPrintersProvider: _installedPrintersProvider);
-
-                DialogResult result = recoveryForm.ShowDialog(this);
-                if (IsDisposed || Disposing || result != DialogResult.OK)
-                {
-                    return false;
-                }
-
-                AppConfig? updatedConfig = _configService.LoadAppConfig();
-                if (updatedConfig != null)
-                {
-                    _config = updatedConfig;
-                }
-
-                ClearStatusNotice();
-                return true;
+                return false;
             }
-            finally
+
+            AppConfig? updatedConfig = _configService.LoadAppConfig();
+            if (updatedConfig != null)
             {
-                _isRecoveringToken = false;
+                _config = updatedConfig;
             }
+
+            ClearStatusNotice();
+            return true;
         }
 
         private LabelTemplateProfile GetActiveTemplateProfile()
@@ -574,7 +584,7 @@ namespace OpenBISLabelStudio
 
                 if (!result.Success && string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (TryRecoverExpiredToken(result.Error))
+                    if (await TryRecoverExpiredTokenAsync(result.Error))
                     {
                         if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
                         {
@@ -590,6 +600,10 @@ namespace OpenBISLabelStudio
                         {
                             return;
                         }
+                    }
+                    else if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
+                    {
+                        return;
                     }
                 }
 
@@ -658,7 +672,7 @@ namespace OpenBISLabelStudio
 
                 if (!result.Success && string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (TryRecoverExpiredToken(result.Error))
+                    if (await TryRecoverExpiredTokenAsync(result.Error))
                     {
                         if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
                         {
@@ -674,6 +688,10 @@ namespace OpenBISLabelStudio
                         {
                             return;
                         }
+                    }
+                    else if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
+                    {
+                        return;
                     }
                 }
 
@@ -899,6 +917,9 @@ namespace OpenBISLabelStudio
 
         private void btnSettings_Click(object? sender, EventArgs e)
         {
+            // Cancel any in-flight startup type refresh so it cannot open recovery UI over Settings or apply stale data.
+            ++_typeRefreshRequestVersion;
+
             string previousUrl = _config.OpenBisUrl;
             string previousToken = _config.Token;
             string previousTypeCode = _currentSelectedTypeCode;
@@ -917,6 +938,7 @@ namespace OpenBISLabelStudio
                 return;
             }
 
+            ++_typeRefreshRequestVersion;
             ReloadConfiguredStateFromDisk();
             PopulateInstalledPrinters();
 
@@ -961,6 +983,71 @@ namespace OpenBISLabelStudio
 
         private void groupBox1_Enter(object sender, EventArgs e)
         {
+        }
+    }
+
+    /// <summary>
+    /// Coalesces concurrent expired-token recovery triggers so only one recovery prompt
+    /// executes at a time while all in-flight callers await its shared outcome.
+    /// </summary>
+    public sealed class TokenRecoveryCoordinator
+    {
+        private readonly object _syncLock = new object();
+        private Task<bool>? _inFlightRecovery;
+
+        /// <summary>
+        /// Runs <paramref name="promptAsync"/> if no recovery is currently active, or returns
+        /// the shared in-flight recovery task for concurrent callers.
+        /// </summary>
+        public Task<bool> RecoverAsync(Func<Task<bool>> promptAsync)
+        {
+            ArgumentNullException.ThrowIfNull(promptAsync);
+
+            TaskCompletionSource<bool> tcs;
+            lock (_syncLock)
+            {
+                if (_inFlightRecovery != null)
+                {
+                    return _inFlightRecovery;
+                }
+
+                tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _inFlightRecovery = tcs.Task;
+            }
+
+            _ = ExecutePromptAsync(promptAsync, tcs);
+            return tcs.Task;
+        }
+
+        private async Task ExecutePromptAsync(Func<Task<bool>> promptAsync, TaskCompletionSource<bool> tcs)
+        {
+            bool recovered = false;
+            Exception? capturedException = null;
+            try
+            {
+                recovered = await promptAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                capturedException = ex;
+            }
+
+            lock (_syncLock)
+            {
+                if (ReferenceEquals(_inFlightRecovery, tcs.Task))
+                {
+                    _inFlightRecovery = null;
+                }
+            }
+
+            if (capturedException != null)
+            {
+                tcs.TrySetException(capturedException);
+            }
+            else
+            {
+                tcs.TrySetResult(recovered);
+            }
         }
     }
 }
