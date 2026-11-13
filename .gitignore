@@ -1,4 +1,6 @@
 # Sensitive Configuration & Token
+config/
+**/config/
 openbis_config.json
 **/openbis_config.json
 
