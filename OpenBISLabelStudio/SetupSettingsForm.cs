@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Printing;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -36,8 +37,8 @@ namespace OpenBISLabelStudio
         private readonly string? _initialWarning;
 
         private readonly List<TypeRowEntry> _masterTypeRows = new List<TypeRowEntry>();
-        private readonly Dictionary<Models.LabelTemplateProfile, Dictionary<Models.LabelTemplateType, Image>> _previewCache
-            = new Dictionary<Models.LabelTemplateProfile, Dictionary<Models.LabelTemplateType, Image>>();
+        private readonly Dictionary<(Models.LabelTemplateProfile Profile, Models.LabelTemplateType Slot), Image> _previewCache
+            = new Dictionary<(Models.LabelTemplateProfile Profile, Models.LabelTemplateType Slot), Image>();
         private readonly Font _tabRegularFont = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
         private readonly Font _tabBoldFont = new Font("Segoe UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
         private readonly Font _previewRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
@@ -45,6 +46,8 @@ namespace OpenBISLabelStudio
 
         private Models.SetupWizardStep _currentStep;
         private Models.LabelTemplateProfile _activePreviewProfile = Models.LabelTemplateProfile.Molecule;
+        private CancellationTokenSource? _previewRenderCts;
+        private long _previewRenderVersion;
         private bool _isInitializingInputs;
         private bool _isPopulatingGrid;
         private bool _isBusy;
@@ -318,17 +321,15 @@ namespace OpenBISLabelStudio
             }
 
             _resourcesDisposed = true;
+            CancelPendingPreviewRender();
 
-            if (picPreviewSmallBox != null && !picPreviewSmallBox.IsDisposed) picPreviewSmallBox.Image = null;
-            if (picPreviewMagnet != null && !picPreviewMagnet.IsDisposed) picPreviewMagnet.Image = null;
-            if (picPreviewFlask != null && !picPreviewFlask.IsDisposed) picPreviewFlask.Image = null;
+            AssignPreviewPictureBoxImage(picPreviewSmallBox, null);
+            AssignPreviewPictureBoxImage(picPreviewMagnet, null);
+            AssignPreviewPictureBoxImage(picPreviewFlask, null);
 
-            foreach (Dictionary<Models.LabelTemplateType, Image> slotMap in _previewCache.Values)
+            foreach (Image image in _previewCache.Values)
             {
-                foreach (Image image in slotMap.Values)
-                {
-                    image.Dispose();
-                }
+                image.Dispose();
             }
 
             _previewCache.Clear();
@@ -461,6 +462,7 @@ namespace OpenBISLabelStudio
 
             if (_currentStep == Models.SetupWizardStep.ObjectTypes && step != Models.SetupWizardStep.ObjectTypes)
             {
+                CancelPendingPreviewRender();
                 CommitGridEdits();
                 SyncVisibleGridToMaster();
             }
@@ -726,27 +728,222 @@ namespace OpenBISLabelStudio
             return firstSelected?.TemplateProfile ?? Models.LabelTemplateProfile.Molecule;
         }
 
-        private void EnsureExamplePreviewsLoaded(Models.LabelTemplateProfile profile)
-        {
-            if (!_previewCache.ContainsKey(profile))
-            {
-                _previewCache[profile] = _previewRenderer.RenderExamplePreviews(profile);
-            }
-        }
-
         private void ShowExamplePreviews(Models.LabelTemplateProfile profile)
         {
+            if (_resourcesDisposed || IsDisposed || Disposing)
+            {
+                return;
+            }
+
+            long requestVersion = ++_previewRenderVersion;
+            CancelPendingPreviewRender();
+
             _activePreviewProfile = profile;
             UpdatePreviewToggleVisuals();
 
-            EnsureExamplePreviewsLoaded(profile);
+            SetSlotPreviewOrPlaceholder(picPreviewSmallBox, Models.LabelTemplateType.SmallBox12mm, profile);
+            SetSlotPreviewOrPlaceholder(picPreviewMagnet, Models.LabelTemplateType.Magnet12mm, profile);
+            SetSlotPreviewOrPlaceholder(picPreviewFlask, Models.LabelTemplateType.Flask24mm, profile);
 
-            if (_previewCache.TryGetValue(profile, out Dictionary<Models.LabelTemplateType, Image>? images))
+            bool needsPrimaryRender = AnySlotUncached(profile);
+            Models.LabelTemplateProfile otherProfile = profile == Models.LabelTemplateProfile.Molecule
+                ? Models.LabelTemplateProfile.Generic
+                : Models.LabelTemplateProfile.Molecule;
+            bool needsPrewarm = AnySlotUncached(otherProfile);
+
+            if (!needsPrimaryRender && !needsPrewarm)
             {
-                picPreviewSmallBox.Image = images.GetValueOrDefault(Models.LabelTemplateType.SmallBox12mm);
-                picPreviewMagnet.Image = images.GetValueOrDefault(Models.LabelTemplateType.Magnet12mm);
-                picPreviewFlask.Image = images.GetValueOrDefault(Models.LabelTemplateType.Flask24mm);
+                return;
             }
+
+            _previewRenderCts = new CancellationTokenSource();
+            _ = LoadAndPrewarmExamplePreviewsAsync(profile, otherProfile, requestVersion, _previewRenderCts.Token);
+        }
+
+        private bool AnySlotUncached(Models.LabelTemplateProfile profile)
+        {
+            foreach (Models.LabelTemplateType slot in Enum.GetValues<Models.LabelTemplateType>())
+            {
+                if (!_previewCache.ContainsKey((profile, slot)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void SetSlotPreviewOrPlaceholder(
+            PictureBox picBox,
+            Models.LabelTemplateType slot,
+            Models.LabelTemplateProfile profile)
+        {
+            if (_previewCache.TryGetValue((profile, slot), out Image? cachedImage))
+            {
+                AssignPreviewPictureBoxImage(picBox, cachedImage);
+            }
+            else
+            {
+                AssignPreviewPictureBoxImage(picBox, LabelPreviewRenderer.CreateLoadingPreviewBitmap(slot, profile));
+            }
+        }
+
+        private async Task LoadAndPrewarmExamplePreviewsAsync(
+            Models.LabelTemplateProfile requestedProfile,
+            Models.LabelTemplateProfile secondaryProfile,
+            long requestVersion,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await RenderProfileSlotsAsync(requestedProfile, requestVersion, updateUiOnSlotReady: true, cancellationToken);
+
+                if (cancellationToken.IsCancellationRequested
+                    || IsDisposed
+                    || Disposing
+                    || _resourcesDisposed
+                    || requestVersion != _previewRenderVersion
+                    || _currentStep != Models.SetupWizardStep.ObjectTypes)
+                {
+                    return;
+                }
+
+                await RenderProfileSlotsAsync(secondaryProfile, requestVersion, updateUiOnSlotReady: false, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // Ignored when user switches profile, leaves ObjectTypes step, or closes the dialog.
+            }
+        }
+
+        private async Task RenderProfileSlotsAsync(
+            Models.LabelTemplateProfile profile,
+            long requestVersion,
+            bool updateUiOnSlotReady,
+            CancellationToken cancellationToken)
+        {
+            Models.SampleDetailsDto example = LabelPreviewRenderer.BuildExampleSampleDetails(profile);
+            string exampleFreeText = profile == Models.LabelTemplateProfile.Generic ? "Batch #4 / Substrate" : "";
+
+            foreach (Models.LabelTemplateType slot in Enum.GetValues<Models.LabelTemplateType>())
+            {
+                if (cancellationToken.IsCancellationRequested
+                    || IsDisposed
+                    || Disposing
+                    || _resourcesDisposed
+                    || requestVersion != _previewRenderVersion
+                    || _currentStep != Models.SetupWizardStep.ObjectTypes)
+                {
+                    return;
+                }
+
+                if (_previewCache.ContainsKey((profile, slot)))
+                {
+                    continue;
+                }
+
+                Image rendered = await _previewRenderer.RenderTemplatePreviewAsync(
+                    slot,
+                    profile,
+                    example,
+                    exampleFreeText,
+                    cancellationToken);
+
+                if (IsDisposed || Disposing || _resourcesDisposed)
+                {
+                    rendered.Dispose();
+                    return;
+                }
+
+                Image imageToDisplay;
+                if (_previewCache.TryGetValue((profile, slot), out Image? existing))
+                {
+                    rendered.Dispose();
+                    imageToDisplay = existing;
+                }
+                else
+                {
+                    _previewCache[(profile, slot)] = rendered;
+                    imageToDisplay = rendered;
+                }
+
+                if (updateUiOnSlotReady
+                    && !cancellationToken.IsCancellationRequested
+                    && requestVersion == _previewRenderVersion
+                    && _activePreviewProfile == profile
+                    && _currentStep == Models.SetupWizardStep.ObjectTypes)
+                {
+                    AssignPreviewPictureBoxImage(GetPreviewPictureBox(slot), imageToDisplay);
+                }
+            }
+        }
+
+        private PictureBox GetPreviewPictureBox(Models.LabelTemplateType slot)
+        {
+            return slot switch
+            {
+                Models.LabelTemplateType.SmallBox12mm => picPreviewSmallBox,
+                Models.LabelTemplateType.Magnet12mm => picPreviewMagnet,
+                Models.LabelTemplateType.Flask24mm => picPreviewFlask,
+                _ => picPreviewSmallBox
+            };
+        }
+
+        private void AssignPreviewPictureBoxImage(PictureBox? picBox, Image? nextImage)
+        {
+            if (picBox == null || picBox.IsDisposed)
+            {
+                if (nextImage != null && !IsCachedPreviewImage(nextImage))
+                {
+                    nextImage.Dispose();
+                }
+                return;
+            }
+
+            Image? previous = picBox.Image;
+            if (ReferenceEquals(previous, nextImage))
+            {
+                return;
+            }
+
+            picBox.Image = nextImage;
+            if (previous != null && !IsCachedPreviewImage(previous))
+            {
+                previous.Dispose();
+            }
+        }
+
+        private bool IsCachedPreviewImage(Image image)
+        {
+            foreach (Image cached in _previewCache.Values)
+            {
+                if (ReferenceEquals(cached, image))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void CancelPendingPreviewRender()
+        {
+            if (_previewRenderCts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _previewRenderCts.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation failure during disposal.
+            }
+
+            _previewRenderCts.Dispose();
+            _previewRenderCts = null;
         }
 
         private void UpdatePreviewToggleVisuals()

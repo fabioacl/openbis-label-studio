@@ -3,7 +3,18 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Printing;
+using System.Globalization;
 using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Xml.Linq;
 
 namespace OpenBISLabelStudio.Services
 {
@@ -11,22 +22,90 @@ namespace OpenBISLabelStudio.Services
 
     /// <summary>
     /// Populates Brother b-PAC label templates for Molecule and Generic profiles, exports preview
-    /// bitmaps, and provides COM-safe fallback images and realistic example sample payloads.
+    /// bitmaps (cropping oversized A4 fallback canvases to exact .lbx dimensions), and provides
+    /// non-blocking STA async rendering plus loading/fallback bitmaps.
     /// </summary>
     public class LabelPreviewRenderer
     {
+        public const int ExportResolutionDpi = 360;
         private const string DefaultFreeTextPlaceholder = "Free text placeholder";
         private const string TransparentPngFileName = "openbis_transparent_1x1.png";
+        private static readonly SemaphoreSlim StaRenderGate = new SemaphoreSlim(1, 1);
+        private static readonly Regex PaperPrinterAttrRegex = new Regex(
+            @"(<style:paper\b[^>]*?\bprinterName\s*=\s*"")([^""]*)("")",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        private static readonly Regex LengthValueRegex = new Regex(
+            @"^\s*([0-9]+(?:\.[0-9]+)?)\s*(pt|mm|cm|in)?\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         private readonly AppConfigService _configService;
+        private readonly Func<IReadOnlyList<string>>? _installedPrintersProvider;
         private string _transparentPngPath = "";
 
         /// <summary>
         /// Initializes a renderer that resolves .lbx template paths via <paramref name="configService"/>.
         /// </summary>
-        public LabelPreviewRenderer(AppConfigService configService)
+        public LabelPreviewRenderer(
+            AppConfigService configService,
+            Func<IReadOnlyList<string>>? installedPrintersProvider = null)
         {
             _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+            _installedPrintersProvider = installedPrintersProvider;
             _transparentPngPath = GetOrCreateTransparentPng();
+        }
+
+        /// <summary>
+        /// Renders a preview image asynchronously on a serialized background STA thread
+        /// so WinForms UI threads never stall on COM/printer driver queries.
+        /// </summary>
+        public async Task<Image> RenderTemplatePreviewAsync(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText = "",
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(details);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            await StaRenderGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var tcs = new TaskCompletionSource<Image>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var staThread = new Thread(() =>
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        tcs.TrySetCanceled(cancellationToken);
+                        return;
+                    }
+
+                    try
+                    {
+                        Image image = RenderTemplatePreview(slot, profile, details, freeText);
+                        tcs.TrySetResult(image);
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = $"bPACPreview_{slot}"
+                };
+
+                staThread.SetApartmentState(ApartmentState.STA);
+                staThread.Start();
+
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                StaRenderGate.Release();
+            }
         }
 
         /// <summary>
@@ -51,12 +130,31 @@ namespace OpenBISLabelStudio.Services
             }
 
             string? tempPreviewFile = null;
+            string? tempOverrideLbx = null;
             bpac.Document? doc = null;
 
             try
             {
+                bool hasPaperSize = TryReadLbxMetadata(
+                    templatePath,
+                    out int expectedWidthPx,
+                    out int expectedHeightPx,
+                    out string? designedPrinter);
+
+                string effectiveTemplatePath = templatePath;
+                IReadOnlyList<string> installedPrinters = _installedPrintersProvider?.Invoke() ?? GetSystemInstalledPrinters();
+                string? overridePrinter = SelectPreviewPrinterOverride(designedPrinter, installedPrinters);
+                if (!string.IsNullOrEmpty(overridePrinter))
+                {
+                    tempOverrideLbx = TryCreateTempLbxWithPrinter(templatePath, overridePrinter);
+                    if (!string.IsNullOrEmpty(tempOverrideLbx))
+                    {
+                        effectiveTemplatePath = tempOverrideLbx;
+                    }
+                }
+
                 doc = new bpac.Document();
-                if (!doc.Open(templatePath))
+                if (!doc.Open(effectiveTemplatePath))
                 {
                     return CreateFallbackPreviewBitmap(
                         slot,
@@ -70,7 +168,7 @@ namespace OpenBISLabelStudio.Services
                     Path.GetTempPath(),
                     $"openbis_preview_{slot}_{Guid.NewGuid():N}.png");
 
-                if (!doc.Export((bpac.ExportType)4, tempPreviewFile, 360) || !File.Exists(tempPreviewFile))
+                if (!doc.Export((bpac.ExportType)4, tempPreviewFile, ExportResolutionDpi) || !File.Exists(tempPreviewFile))
                 {
                     return CreateFallbackPreviewBitmap(
                         slot,
@@ -80,7 +178,11 @@ namespace OpenBISLabelStudio.Services
 
                 using var fs = new FileStream(tempPreviewFile, FileMode.Open, FileAccess.Read, FileShare.Read);
                 using Image original = Image.FromStream(fs);
-                return new Bitmap(original);
+                using var exportedBitmap = new Bitmap(original);
+
+                return hasPaperSize
+                    ? CropFallbackExportBitmap(exportedBitmap, expectedWidthPx, expectedHeightPx)
+                    : new Bitmap(exportedBitmap);
             }
             catch (Exception ex)
             {
@@ -103,17 +205,8 @@ namespace OpenBISLabelStudio.Services
                     }
                 }
 
-                if (!string.IsNullOrEmpty(tempPreviewFile) && File.Exists(tempPreviewFile))
-                {
-                    try
-                    {
-                        File.Delete(tempPreviewFile);
-                    }
-                    catch
-                    {
-                        // Ignore best-effort cleanup failure for temp preview PNG.
-                    }
-                }
+                TryDeleteTempFile(tempPreviewFile);
+                TryDeleteTempFile(tempOverrideLbx);
             }
         }
 
@@ -180,6 +273,210 @@ namespace OpenBISLabelStudio.Services
             LabelTemplateProfile profile,
             string reason)
         {
+            string safeReason = string.IsNullOrWhiteSpace(reason) ? "Preview unavailable." : reason.Trim();
+            return CreateSlotStatusBitmap(slot, profile, safeReason, Color.DimGray);
+        }
+
+        /// <summary>
+        /// Draws a lightweight loading card while b-PAC renders the label preview off the UI thread.
+        /// </summary>
+        public static Bitmap CreateLoadingPreviewBitmap(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile)
+        {
+            return CreateSlotStatusBitmap(slot, profile, "Rendering label preview...", Color.FromArgb(37, 99, 235));
+        }
+
+        /// <summary>
+        /// Reads the designed label canvas dimensions (in pixels at 360 DPI) from an .lbx template archive.
+        /// </summary>
+        public static bool TryReadLbxPaperSizePx(string lbxPath, out int widthPx, out int heightPx)
+        {
+            return TryReadLbxMetadata(lbxPath, out widthPx, out heightPx, out _);
+        }
+
+        /// <summary>
+        /// Selects a safe local preview printer when the template's saved Brother printer driver is missing,
+        /// avoiding remote SMB spooler stalls and hardware margin clipping on fallback A4 printers.
+        /// Returns null when the original .lbx should be opened unmodified.
+        /// </summary>
+        public static string? SelectPreviewPrinterOverride(string? designedPrinterName, IReadOnlyList<string>? installedPrinters)
+        {
+            if (installedPrinters == null || installedPrinters.Count == 0)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(designedPrinterName)
+                && installedPrinters.Any(p => string.Equals(p?.Trim(), designedPrinterName.Trim(), StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            string? brotherPrinter = installedPrinters.FirstOrDefault(
+                p => !string.IsNullOrWhiteSpace(p) && p.Contains("Brother", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(brotherPrinter))
+            {
+                return brotherPrinter.Trim();
+            }
+
+            string? pdfPrinter = installedPrinters.FirstOrDefault(
+                p => string.Equals(p?.Trim(), "Microsoft Print to PDF", StringComparison.OrdinalIgnoreCase));
+            return string.IsNullOrWhiteSpace(pdfPrinter) ? null : pdfPrinter.Trim();
+        }
+
+        /// <summary>
+        /// Creates a temporary copy of <paramref name="sourceLbxPath"/> whose paper printerName
+        /// targets <paramref name="targetPrinterName"/>, leaving the original template file untouched.
+        /// </summary>
+        public static string? TryCreateTempLbxWithPrinter(string sourceLbxPath, string targetPrinterName)
+        {
+            if (string.IsNullOrWhiteSpace(sourceLbxPath)
+                || !File.Exists(sourceLbxPath)
+                || string.IsNullOrWhiteSpace(targetPrinterName))
+            {
+                return null;
+            }
+
+            string tempLbxPath = Path.Combine(Path.GetTempPath(), $"openbis_tpl_{Guid.NewGuid():N}.lbx");
+            try
+            {
+                File.Copy(sourceLbxPath, tempLbxPath, overwrite: true);
+
+                using (ZipArchive archive = ZipFile.Open(tempLbxPath, ZipArchiveMode.Update))
+                {
+                    ZipArchiveEntry? entry = archive.GetEntry("label.xml");
+                    if (entry == null)
+                    {
+                        TryDeleteTempFile(tempLbxPath);
+                        return null;
+                    }
+
+                    string xml;
+                    using (var reader = new StreamReader(entry.Open(), Encoding.UTF8))
+                    {
+                        xml = reader.ReadToEnd();
+                    }
+
+                    string escapedPrinter = SecurityElement.Escape(targetPrinterName.Trim()) ?? "";
+                    string updatedXml;
+                    if (PaperPrinterAttrRegex.IsMatch(xml))
+                    {
+                        updatedXml = PaperPrinterAttrRegex.Replace(xml, m => m.Groups[1].Value + escapedPrinter + m.Groups[3].Value, 1);
+                    }
+                    else
+                    {
+                        TryDeleteTempFile(tempLbxPath);
+                        return null;
+                    }
+
+                    entry.Delete();
+                    ZipArchiveEntry updatedEntry = archive.CreateEntry("label.xml");
+                    using var writer = new StreamWriter(updatedEntry.Open(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    writer.Write(updatedXml);
+                }
+
+                return tempLbxPath;
+            }
+            catch
+            {
+                TryDeleteTempFile(tempLbxPath);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Crops oversized fallback exports (such as full-page A4 outputs when no Brother driver is installed)
+        /// down to the template's designed label bounds while preserving native-sized exports untouched.
+        /// </summary>
+        public static Bitmap CropFallbackExportBitmap(Bitmap exportedBitmap, int expectedWidthPx, int expectedHeightPx)
+        {
+            ArgumentNullException.ThrowIfNull(exportedBitmap);
+
+            if (expectedWidthPx <= 0 || expectedHeightPx <= 0)
+            {
+                return new Bitmap(exportedBitmap);
+            }
+
+            bool isOversizedFallback = exportedBitmap.Width > expectedWidthPx * 1.35
+                                       || exportedBitmap.Height > expectedHeightPx * 1.35;
+            if (!isOversizedFallback)
+            {
+                return new Bitmap(exportedBitmap);
+            }
+
+            int cropW = Math.Min(exportedBitmap.Width, expectedWidthPx);
+            int cropH = Math.Min(exportedBitmap.Height, expectedHeightPx);
+
+            int scanW = Math.Min(exportedBitmap.Width, expectedWidthPx * 2);
+            int scanH = Math.Min(exportedBitmap.Height, expectedHeightPx * 2);
+
+            BitmapData? bmpData = null;
+            try
+            {
+                bmpData = exportedBitmap.LockBits(
+                    new Rectangle(0, 0, scanW, scanH),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb);
+
+                int rowBytes = scanW * 4;
+                byte[] rowBuffer = new byte[rowBytes];
+                long scan0 = bmpData.Scan0.ToInt64();
+                int maxInkX = -1;
+                int maxInkY = -1;
+
+                for (int y = 0; y < scanH; y++)
+                {
+                    Marshal.Copy(new IntPtr(scan0 + ((long)y * bmpData.Stride)), rowBuffer, 0, rowBytes);
+
+                    for (int x = 0; x < scanW; x++)
+                    {
+                        int offset = x * 4;
+                        byte b = rowBuffer[offset];
+                        byte g = rowBuffer[offset + 1];
+                        byte r = rowBuffer[offset + 2];
+                        byte a = rowBuffer[offset + 3];
+
+                        if (a > 10 && (r < 248 || g < 248 || b < 248))
+                        {
+                            if (x > maxInkX) maxInkX = x;
+                            if (y > maxInkY) maxInkY = y;
+                        }
+                    }
+                }
+
+                if (maxInkX >= cropW)
+                {
+                    cropW = Math.Min(exportedBitmap.Width, maxInkX + 16);
+                }
+
+                if (maxInkY >= cropH)
+                {
+                    cropH = Math.Min(exportedBitmap.Height, maxInkY + 16);
+                }
+            }
+            catch
+            {
+                // Fall back to designed paper crop bounds if LockBits fails.
+            }
+            finally
+            {
+                if (bmpData != null)
+                {
+                    exportedBitmap.UnlockBits(bmpData);
+                }
+            }
+
+            Rectangle cropRect = new Rectangle(0, 0, Math.Max(1, cropW), Math.Max(1, cropH));
+            return exportedBitmap.Clone(cropRect, PixelFormat.Format32bppArgb);
+        }
+
+        private static Bitmap CreateSlotStatusBitmap(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            string message,
+            Color messageColor)
+        {
             (int width, int height) = slot switch
             {
                 LabelTemplateType.SmallBox12mm => (300, 120),
@@ -211,14 +508,131 @@ namespace OpenBISLabelStudio.Services
             using var titleFont = new Font("Segoe UI", 9.5f, FontStyle.Bold);
             using var bodyFont = new Font("Segoe UI", 8.25f, FontStyle.Regular);
             using var titleBrush = new SolidBrush(Color.FromArgb(40, 40, 40));
-            using var bodyBrush = new SolidBrush(Color.DimGray);
+            using var bodyBrush = new SolidBrush(messageColor);
 
             g.DrawString($"{slotLabel} — {profileLabel}", titleFont, titleBrush, new RectangleF(10, 10, width - 20, 24));
-
-            string safeReason = string.IsNullOrWhiteSpace(reason) ? "Preview unavailable." : reason.Trim();
-            g.DrawString(safeReason, bodyFont, bodyBrush, new RectangleF(10, 38, width - 20, height - 48));
+            g.DrawString(message, bodyFont, bodyBrush, new RectangleF(10, 38, width - 20, height - 48));
 
             return bitmap;
+        }
+
+        private static bool TryReadLbxMetadata(string lbxPath, out int widthPx, out int heightPx, out string? printerName)
+        {
+            widthPx = 0;
+            heightPx = 0;
+            printerName = null;
+
+            if (string.IsNullOrWhiteSpace(lbxPath) || !File.Exists(lbxPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                using ZipArchive archive = ZipFile.OpenRead(lbxPath);
+                ZipArchiveEntry? entry = archive.GetEntry("label.xml");
+                if (entry == null)
+                {
+                    return false;
+                }
+
+                using Stream stream = entry.Open();
+                XDocument doc = XDocument.Load(stream);
+                XElement? paper = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "paper");
+                if (paper == null)
+                {
+                    return false;
+                }
+
+                printerName = paper.Attribute("printerName")?.Value;
+
+                if (!TryParseLengthToPoints(paper.Attribute("width")?.Value, out double rawW)
+                    || !TryParseLengthToPoints(paper.Attribute("height")?.Value, out double rawH))
+                {
+                    return false;
+                }
+
+                string orientation = paper.Attribute("orientation")?.Value ?? "";
+                bool isLandscape = string.Equals(orientation, "landscape", StringComparison.OrdinalIgnoreCase);
+
+                double horizontalPt = isLandscape ? rawH : rawW;
+                double verticalPt = isLandscape ? rawW : rawH;
+
+                widthPx = Math.Max(1, (int)Math.Round(horizontalPt * ExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
+                heightPx = Math.Max(1, (int)Math.Round(verticalPt * ExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryParseLengthToPoints(string? raw, out double points)
+        {
+            points = 0;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            Match match = LengthValueRegex.Match(raw);
+            if (!match.Success
+                || !double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+                || value <= 0)
+            {
+                return false;
+            }
+
+            string unit = match.Groups[2].Value.ToLowerInvariant();
+            points = unit switch
+            {
+                "" or "pt" => value,
+                "in" => value * 72.0,
+                "mm" => value * 72.0 / 25.4,
+                "cm" => value * 72.0 / 2.54,
+                _ => 0
+            };
+
+            return points > 0;
+        }
+
+        private static IReadOnlyList<string> GetSystemInstalledPrinters()
+        {
+            var printers = new List<string>();
+            try
+            {
+                foreach (string printer in PrinterSettings.InstalledPrinters)
+                {
+                    if (!string.IsNullOrWhiteSpace(printer))
+                    {
+                        printers.Add(printer);
+                    }
+                }
+            }
+            catch
+            {
+                // Return empty list if spooler enumeration fails.
+            }
+
+            return printers;
+        }
+
+        private static void TryDeleteTempFile(string? path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                File.Delete(path);
+            }
+            catch
+            {
+                // Ignore best-effort cleanup failure for transient temp files.
+            }
         }
 
         /// <summary>

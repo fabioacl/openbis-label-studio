@@ -5,6 +5,7 @@ using System.Drawing.Printing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using OpenBISLabelStudio.Models;
@@ -31,6 +32,8 @@ namespace OpenBISLabelStudio
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
         private readonly TokenRecoveryCoordinator _tokenRecoveryCoordinator = new TokenRecoveryCoordinator();
+        private readonly Dictionary<LabelTemplateType, long> _slotRenderVersions = new Dictionary<LabelTemplateType, long>();
+        private readonly Dictionary<LabelTemplateType, CancellationTokenSource> _slotPreviewCts = new Dictionary<LabelTemplateType, CancellationTokenSource>();
         private long _typeRefreshRequestVersion;
         private long _typeSelectionRequestVersion;
         private long _sampleDetailsRequestVersion;
@@ -121,6 +124,7 @@ namespace OpenBISLabelStudio
 
         partial void DisposeManagedResources()
         {
+            CancelAllSlotPreviewRenders();
             SetPictureBoxImage(smallBoxLabelPreview, null);
             SetPictureBoxImage(magnetLabelPreview, null);
             SetPictureBoxImage(flaskLabelPreview, null);
@@ -788,9 +792,67 @@ namespace OpenBISLabelStudio
             string magnetFreeText = profile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : "";
             string flaskFreeText = profile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : "";
 
-            RenderSlotPreview(smallBoxLabelPreview, LabelTemplateType.SmallBox12mm, profile, details, "");
-            RenderSlotPreview(magnetLabelPreview, LabelTemplateType.Magnet12mm, profile, details, magnetFreeText);
-            RenderSlotPreview(flaskLabelPreview, LabelTemplateType.Flask24mm, profile, details, flaskFreeText);
+            _ = RenderSlotPreviewAsync(smallBoxLabelPreview, LabelTemplateType.SmallBox12mm, profile, details, "");
+            _ = RenderSlotPreviewAsync(magnetLabelPreview, LabelTemplateType.Magnet12mm, profile, details, magnetFreeText);
+            _ = RenderSlotPreviewAsync(flaskLabelPreview, LabelTemplateType.Flask24mm, profile, details, flaskFreeText);
+        }
+
+        private async Task RenderSlotPreviewAsync(
+            PictureBox picBox,
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText)
+        {
+            if (IsDisposed || Disposing)
+            {
+                return;
+            }
+
+            long slotVersion = (_slotRenderVersions.TryGetValue(slot, out long current) ? current : 0) + 1;
+            _slotRenderVersions[slot] = slotVersion;
+            CancelSlotPreviewRender(slot);
+
+            var cts = new CancellationTokenSource();
+            _slotPreviewCts[slot] = cts;
+            CancellationToken cancellationToken = cts.Token;
+
+            SetPictureBoxImage(picBox, LabelPreviewRenderer.CreateLoadingPreviewBitmap(slot, profile));
+
+            try
+            {
+                Image previewImage = await _previewRenderer.RenderTemplatePreviewAsync(
+                    slot,
+                    profile,
+                    details,
+                    freeText,
+                    cancellationToken);
+
+                if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested
+                    || !_slotRenderVersions.TryGetValue(slot, out long activeVersion)
+                    || activeVersion != slotVersion)
+                {
+                    previewImage.Dispose();
+                    return;
+                }
+
+                SetPictureBoxImage(picBox, previewImage);
+            }
+            catch (OperationCanceledException)
+            {
+                // Ignored when a newer render or ClearAllPreviews supersedes this slot request.
+            }
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing
+                    && _slotRenderVersions.TryGetValue(slot, out long activeVersion)
+                    && activeVersion == slotVersion)
+                {
+                    SetPictureBoxImage(
+                        picBox,
+                        LabelPreviewRenderer.CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}"));
+                }
+            }
         }
 
         private void RenderSlotPreview(
@@ -800,8 +862,37 @@ namespace OpenBISLabelStudio
             SampleDetailsDto details,
             string freeText)
         {
-            Image previewImage = _previewRenderer.RenderTemplatePreview(slot, profile, details, freeText);
-            SetPictureBoxImage(picBox, previewImage);
+            _ = RenderSlotPreviewAsync(picBox, slot, profile, details, freeText);
+        }
+
+        private void CancelSlotPreviewRender(LabelTemplateType slot)
+        {
+            if (!_slotPreviewCts.TryGetValue(slot, out CancellationTokenSource? existing))
+            {
+                return;
+            }
+
+            _slotPreviewCts.Remove(slot);
+            try
+            {
+                existing.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation failure during disposal.
+            }
+
+            existing.Dispose();
+        }
+
+        private void CancelAllSlotPreviewRenders()
+        {
+            foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+            {
+                long nextVersion = (_slotRenderVersions.TryGetValue(slot, out long current) ? current : 0) + 1;
+                _slotRenderVersions[slot] = nextVersion;
+                CancelSlotPreviewRender(slot);
+            }
         }
 
         private static void SetPictureBoxImage(PictureBox? picBox, Image? newImage)
@@ -822,6 +913,7 @@ namespace OpenBISLabelStudio
 
         private void ClearAllPreviews()
         {
+            CancelAllSlotPreviewRenders();
             _currentSampleDetails = null;
 
             SetPictureBoxImage(smallBoxLabelPreview, null);

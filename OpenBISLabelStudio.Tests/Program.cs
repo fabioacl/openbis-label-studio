@@ -27,6 +27,9 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(OpenBisClientExecutesScriptAndCleansTempOutput), OpenBisClientExecutesScriptAndCleansTempOutput),
                 (nameof(BuildExampleSampleDetailsMatchesProfile), BuildExampleSampleDetailsMatchesProfile),
                 (nameof(RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing), RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing),
+                (nameof(LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly), LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly),
+                (nameof(CropFallbackExportBitmapTrimsA4AndPreservesNativeSize), CropFallbackExportBitmapTrimsA4AndPreservesNativeSize),
+                (nameof(RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation), RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation),
                 (nameof(BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved), BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved),
                 (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
                 (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
@@ -403,6 +406,165 @@ namespace OpenBISLabelStudio.Tests
             });
         }
 
+        private static void LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly()
+        {
+            string templatesDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "templates");
+            if (Directory.Exists(templatesDir))
+            {
+                AssertTrue(LabelPreviewRenderer.TryReadLbxPaperSizePx(
+                    Path.Combine(templatesDir, "template_small_box_12mm.lbx"), out int sbW, out int sbH),
+                    "Should read SmallBox template paper size");
+                AssertEqual(342, sbW, "SmallBox landscape width px mismatch");
+                AssertEqual(168, sbH, "SmallBox landscape height px mismatch");
+
+                AssertTrue(LabelPreviewRenderer.TryReadLbxPaperSizePx(
+                    Path.Combine(templatesDir, "template_flask_24mm.lbx"), out int flW, out int flH),
+                    "Should read Flask template paper size");
+                AssertEqual(676, flW, "Flask landscape width px mismatch");
+                AssertEqual(340, flH, "Flask landscape height px mismatch");
+            }
+
+            // Test printer override selection rules independently of machine printers.
+            AssertNull(
+                LabelPreviewRenderer.SelectPreviewPrinterOverride(
+                    "Brother PT-P700 (Kopie 2)",
+                    new[] { "Microsoft Print to PDF", "Brother PT-P700 (Kopie 2)" }),
+                "Exact Brother printer installed must use original .lbx without override");
+
+            AssertEqual(
+                "Brother PT-P700",
+                LabelPreviewRenderer.SelectPreviewPrinterOverride(
+                    "Brother PT-P700 (Kopie 2)",
+                    new[] { "Microsoft Print to PDF", "Brother PT-P700" }),
+                "Should prefer another installed Brother printer when exact copy name is absent");
+
+            AssertEqual(
+                "Microsoft Print to PDF",
+                LabelPreviewRenderer.SelectPreviewPrinterOverride(
+                    "Brother PT-P700 (Kopie 2)",
+                    new[] { "OneNote (Desktop)", "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
+                "Should choose local Microsoft Print to PDF when no Brother printer is installed");
+
+            AssertNull(
+                LabelPreviewRenderer.SelectPreviewPrinterOverride(
+                    "Brother PT-P700 (Kopie 2)",
+                    new[] { "OneNote (Desktop)", @"\\emp-ps2\FollowMe" }),
+                "Should return null when neither Brother nor Microsoft Print to PDF is installed");
+
+            // Test unit parsing (mm, portrait) and non-mutating temp .lbx rewrite.
+            WithTempDir(tempRoot =>
+            {
+                string lbxPath = Path.Combine(tempRoot, "synthetic.lbx");
+                string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+                             "<pt:document xmlns:pt=\"http://schemas.brother.info/ptouch/2007/lbx/main\" " +
+                             "xmlns:style=\"http://schemas.brother.info/ptouch/2007/lbx/style\">" +
+                             "<style:paper width=\"25.4mm\" height=\"50.8mm\" orientation=\"portrait\" printerName=\"Missing &amp; Old\" />" +
+                             "</pt:document>";
+
+                using (var archive = System.IO.Compression.ZipFile.Open(lbxPath, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    var entry = archive.CreateEntry("label.xml");
+                    using var writer = new StreamWriter(entry.Open());
+                    writer.Write(xml);
+                }
+
+                AssertTrue(LabelPreviewRenderer.TryReadLbxPaperSizePx(lbxPath, out int wPx, out int hPx),
+                    "Should parse mm portrait .lbx paper dimensions");
+                AssertEqual(360, wPx, "25.4mm portrait width at 360 DPI should be 360px");
+                AssertEqual(720, hPx, "50.8mm portrait height at 360 DPI should be 720px");
+
+                string? tempLbx = LabelPreviewRenderer.TryCreateTempLbxWithPrinter(lbxPath, "Microsoft Print to PDF");
+                AssertNotNull(tempLbx, "Should create temp overridden .lbx");
+                try
+                {
+                    AssertTrue(File.Exists(tempLbx!), "Overridden temp .lbx file must exist");
+                    using var origArchive = System.IO.Compression.ZipFile.OpenRead(lbxPath);
+                    using var origReader = new StreamReader(origArchive.GetEntry("label.xml")!.Open());
+                    AssertTrue(origReader.ReadToEnd().Contains("Missing &amp; Old", StringComparison.Ordinal),
+                        "Original .lbx must remain unmodified");
+
+                    using var tempArchive = System.IO.Compression.ZipFile.OpenRead(tempLbx!);
+                    using var tempReader = new StreamReader(tempArchive.GetEntry("label.xml")!.Open());
+                    string updatedXml = tempReader.ReadToEnd();
+                    AssertTrue(updatedXml.Contains("printerName=\"Microsoft Print to PDF\"", StringComparison.Ordinal),
+                        $"Temp .lbx should replace printerName cleanly, actual: {updatedXml}");
+                }
+                finally
+                {
+                    if (!string.IsNullOrEmpty(tempLbx) && File.Exists(tempLbx))
+                    {
+                        File.Delete(tempLbx);
+                    }
+                }
+            });
+        }
+
+        private static void CropFallbackExportBitmapTrimsA4AndPreservesNativeSize()
+        {
+            // 1. Oversized A4 canvas (e.g. 4210x2977) with label in top-left -> cropped to expected paper bounds.
+            using (var a4 = new Bitmap(4210, 2977, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(a4))
+                {
+                    g.Clear(Color.White);
+                    g.FillRectangle(Brushes.Black, 45, 30, 180, 90);
+                }
+
+                using Bitmap cropped = LabelPreviewRenderer.CropFallbackExportBitmap(a4, 506, 168);
+                AssertEqual(506, cropped.Width, "Oversized A4 bitmap should crop to expected label width");
+                AssertEqual(168, cropped.Height, "Oversized A4 bitmap should crop to expected label height");
+                AssertTrue(cropped.GetPixel(60, 50).R < 50, "Cropped bitmap must preserve label ink pixels");
+            }
+
+            // 2. Native-sized Brother bitmap -> returned untouched without trimming.
+            using (var native = new Bitmap(520, 172, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (Bitmap untouched = LabelPreviewRenderer.CropFallbackExportBitmap(native, 506, 168))
+            {
+                AssertEqual(520, untouched.Width, "Native-sized bitmap width must not be trimmed");
+                AssertEqual(172, untouched.Height, "Native-sized bitmap height must not be trimmed");
+            }
+
+            // 3. Loading preview placeholder card -> non-null disposable Bitmap.
+            using Bitmap loading = LabelPreviewRenderer.CreateLoadingPreviewBitmap(
+                LabelTemplateType.SmallBox12mm,
+                LabelTemplateProfile.Molecule);
+            AssertTrue(loading.Width > 0 && loading.Height > 0, "Loading placeholder bitmap must have non-zero size");
+        }
+
+        private static void RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                var renderer = new LabelPreviewRenderer(configService, () => Array.Empty<string>());
+                ModelTypes.SampleDetailsDto sample = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule);
+
+                using Image fallback = renderer.RenderTemplatePreviewAsync(
+                    LabelTemplateType.SmallBox12mm,
+                    LabelTemplateProfile.Molecule,
+                    sample).GetAwaiter().GetResult();
+                AssertTrue(fallback.Width > 0 && fallback.Height > 0, "Async preview must return fallback bitmap when template missing");
+
+                using var cts = new System.Threading.CancellationTokenSource();
+                cts.Cancel();
+                bool canceled = false;
+                try
+                {
+                    renderer.RenderTemplatePreviewAsync(
+                        LabelTemplateType.SmallBox12mm,
+                        LabelTemplateProfile.Molecule,
+                        sample,
+                        cancellationToken: cts.Token).GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    canceled = true;
+                }
+
+                AssertTrue(canceled, "Pre-canceled token must cancel RenderTemplatePreviewAsync");
+            });
+        }
+
         private static void BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved()
         {
             var serverTypes = new[]
@@ -657,6 +819,7 @@ namespace OpenBISLabelStudio.Tests
 
                     FindControl<Button>(saveForm, "btnPreviewGeneric").PerformClick();
                     AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewMagnet").Image, "Generic Magnet preview image should be populated");
+                    AssertTrue(saveForm.Visible, "ObjectTypes page should remain responsive while async previews render");
 
                     FindControl<TextBox>(saveForm, "txtInstanceUrl").Text = "https://updated.example.org";
                     FindControl<TextBox>(saveForm, "txtToken").Text = "";
