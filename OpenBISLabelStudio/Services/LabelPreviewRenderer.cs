@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -15,6 +16,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using Newtonsoft.Json;
 
 namespace OpenBISLabelStudio.Services
 {
@@ -22,15 +24,26 @@ namespace OpenBISLabelStudio.Services
 
     /// <summary>
     /// Populates Brother b-PAC label templates for Molecule and Generic profiles, exports preview
-    /// bitmaps (cropping oversized A4 fallback canvases to exact .lbx dimensions), and provides
-    /// non-blocking STA async rendering plus loading/fallback bitmaps.
+    /// bitmaps (cropping oversized A4 fallback canvases to exact .lbx dimensions), and runs b-PAC
+    /// COM calls in an isolated worker process so WinForms UI threads never freeze.
     /// </summary>
     public class LabelPreviewRenderer
     {
         public const int ExportResolutionDpi = 360;
         private const string DefaultFreeTextPlaceholder = "Free text placeholder";
         private const string TransparentPngFileName = "openbis_transparent_1x1.png";
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         private static readonly SemaphoreSlim StaRenderGate = new SemaphoreSlim(1, 1);
+        private static readonly SemaphoreSlim WorkerPipeGate = new SemaphoreSlim(1, 1);
+        private static readonly object WorkerLifecycleLock = new object();
+        private static Process? s_workerProcess;
+        private static StreamWriter? s_workerIn;
+        private static StreamReader? s_workerOut;
+
+        static LabelPreviewRenderer()
+        {
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => ShutdownPreviewWorker();
+        }
         private static readonly Regex PaperPrinterAttrRegex = new Regex(
             @"(<style:paper\b[^>]*?\bprinterName\s*=\s*"")([^""]*)("")",
             RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
@@ -55,8 +68,9 @@ namespace OpenBISLabelStudio.Services
         }
 
         /// <summary>
-        /// Renders a preview image asynchronously on a serialized background STA thread
-        /// so WinForms UI threads never stall on COM/printer driver queries.
+        /// Renders a preview image asynchronously without blocking the WinForms Main-STA UI thread.
+        /// Uses an out-of-process worker when templates exist and the main app executable is available
+        /// (because b-PAC's COM DLL has no ThreadingModel and otherwise marshals onto the UI STA thread).
         /// </summary>
         public async Task<Image> RenderTemplatePreviewAsync(
             LabelTemplateType slot,
@@ -67,6 +81,30 @@ namespace OpenBISLabelStudio.Services
         {
             ArgumentNullException.ThrowIfNull(details);
             cancellationToken.ThrowIfCancellationRequested();
+
+            string templatePath = _configService.GetTemplateFilePath(slot, profile);
+            if (!File.Exists(templatePath))
+            {
+                return CreateFallbackPreviewBitmap(
+                    slot,
+                    profile,
+                    $"Template missing:\n{Path.GetFileName(templatePath)}");
+            }
+
+            if (_installedPrintersProvider == null)
+            {
+                string? workerExe = ResolvePreviewWorkerExecutablePath();
+                if (!string.IsNullOrEmpty(workerExe))
+                {
+                    return await RenderViaWorkerProcessAsync(
+                        workerExe,
+                        slot,
+                        profile,
+                        details,
+                        freeText,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
 
             await StaRenderGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -106,6 +144,281 @@ namespace OpenBISLabelStudio.Services
             {
                 StaRenderGate.Release();
             }
+        }
+
+        private sealed class PreviewWorkerRequest
+        {
+            [JsonProperty("baseDir")]
+            public string BaseDir { get; set; } = "";
+
+            [JsonProperty("slot")]
+            public LabelTemplateType Slot { get; set; }
+
+            [JsonProperty("profile")]
+            public LabelTemplateProfile Profile { get; set; }
+
+            [JsonProperty("details")]
+            public SampleDetailsDto? Details { get; set; }
+
+            [JsonProperty("freeText")]
+            public string FreeText { get; set; } = "";
+
+            [JsonProperty("outPath")]
+            public string OutPath { get; set; } = "";
+        }
+
+        private sealed class PreviewWorkerResponse
+        {
+            [JsonProperty("success")]
+            public bool Success { get; set; }
+
+            [JsonProperty("error")]
+            public string Error { get; set; } = "";
+        }
+
+        /// <summary>
+        /// Runs the headless single-request-per-line JSON preview loop in the worker child process.
+        /// </summary>
+        public static void RunPreviewWorkerLoop(TextReader input, TextWriter output)
+        {
+            ArgumentNullException.ThrowIfNull(input);
+            ArgumentNullException.ThrowIfNull(output);
+
+            var renderersByBaseDir = new Dictionary<string, LabelPreviewRenderer>(StringComparer.OrdinalIgnoreCase);
+
+            string? line;
+            while ((line = input.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                PreviewWorkerResponse response;
+                try
+                {
+                    PreviewWorkerRequest? req = JsonConvert.DeserializeObject<PreviewWorkerRequest>(line);
+                    if (req == null || req.Details == null || string.IsNullOrWhiteSpace(req.OutPath))
+                    {
+                        response = new PreviewWorkerResponse { Success = false, Error = "Invalid preview worker request payload." };
+                    }
+                    else
+                    {
+                        string normalizedBaseDir = string.IsNullOrWhiteSpace(req.BaseDir)
+                            ? AppDomain.CurrentDomain.BaseDirectory
+                            : Path.GetFullPath(req.BaseDir);
+
+                        if (!renderersByBaseDir.TryGetValue(normalizedBaseDir, out LabelPreviewRenderer? renderer))
+                        {
+                            renderer = new LabelPreviewRenderer(new AppConfigService(normalizedBaseDir));
+                            renderersByBaseDir[normalizedBaseDir] = renderer;
+                        }
+
+                        string? outDir = Path.GetDirectoryName(req.OutPath);
+                        if (!string.IsNullOrEmpty(outDir))
+                        {
+                            Directory.CreateDirectory(outDir);
+                        }
+
+                        using Image rendered = renderer.RenderTemplatePreview(
+                            req.Slot,
+                            req.Profile,
+                            req.Details,
+                            req.FreeText ?? "");
+                        rendered.Save(req.OutPath, ImageFormat.Png);
+
+                        response = new PreviewWorkerResponse { Success = true };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    response = new PreviewWorkerResponse { Success = false, Error = ex.Message };
+                }
+
+                output.WriteLine(JsonConvert.SerializeObject(response));
+                output.Flush();
+            }
+        }
+
+        private async Task<Image> RenderViaWorkerProcessAsync(
+            string workerExePath,
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText,
+            CancellationToken cancellationToken)
+        {
+            string outPath = Path.Combine(Path.GetTempPath(), $"openbis_worker_preview_{slot}_{Guid.NewGuid():N}.png");
+
+            await WorkerPipeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                EnsurePreviewWorkerStarted(workerExePath);
+                if (s_workerIn == null || s_workerOut == null)
+                {
+                    return CreateFallbackPreviewBitmap(slot, profile, "Preview worker failed to start.");
+                }
+
+                var request = new PreviewWorkerRequest
+                {
+                    BaseDir = Path.GetDirectoryName(_configService.TemplatesDirectoryPath) ?? AppDomain.CurrentDomain.BaseDirectory,
+                    Slot = slot,
+                    Profile = profile,
+                    Details = details,
+                    FreeText = freeText ?? "",
+                    OutPath = outPath
+                };
+
+                await s_workerIn.WriteLineAsync(JsonConvert.SerializeObject(request)).ConfigureAwait(false);
+                await s_workerIn.FlushAsync().ConfigureAwait(false);
+
+                string? responseLine = await s_workerOut.ReadLineAsync().ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(responseLine))
+                {
+                    ShutdownPreviewWorker();
+                    return CreateFallbackPreviewBitmap(slot, profile, "Preview worker closed unexpectedly.");
+                }
+
+                PreviewWorkerResponse? response = JsonConvert.DeserializeObject<PreviewWorkerResponse>(responseLine);
+                if (response == null || !response.Success || !File.Exists(outPath))
+                {
+                    string reason = string.IsNullOrWhiteSpace(response?.Error)
+                        ? "Preview worker did not produce an image."
+                        : response!.Error;
+                    return CreateFallbackPreviewBitmap(slot, profile, reason);
+                }
+
+                using var fs = new FileStream(outPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using Image loaded = Image.FromStream(fs);
+                return new Bitmap(loaded);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                ShutdownPreviewWorker();
+                return CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}");
+            }
+            finally
+            {
+                TryDeleteTempFile(outPath);
+                WorkerPipeGate.Release();
+            }
+        }
+
+        private static string? ResolvePreviewWorkerExecutablePath()
+        {
+            string? processPath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(processPath)
+                && string.Equals(Path.GetFileName(processPath), "OpenBISLabelStudio.exe", StringComparison.OrdinalIgnoreCase)
+                && File.Exists(processPath))
+            {
+                return processPath;
+            }
+
+            string candidate = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OpenBISLabelStudio.exe");
+            return File.Exists(candidate) ? candidate : null;
+        }
+
+        private static void EnsurePreviewWorkerStarted(string workerExePath)
+        {
+            lock (WorkerLifecycleLock)
+            {
+                if (s_workerProcess != null && !s_workerProcess.HasExited && s_workerIn != null && s_workerOut != null)
+                {
+                    return;
+                }
+
+                ShutdownPreviewWorkerUnsafe();
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = workerExePath,
+                    WorkingDirectory = Path.GetDirectoryName(workerExePath) ?? AppDomain.CurrentDomain.BaseDirectory,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardInputEncoding = Utf8NoBom,
+                    StandardOutputEncoding = Utf8NoBom
+                };
+                psi.ArgumentList.Add("--preview-worker");
+
+                Process? proc = Process.Start(psi);
+                if (proc == null)
+                {
+                    return;
+                }
+
+                proc.ErrorDataReceived += (_, _) => { };
+                proc.BeginErrorReadLine();
+
+                s_workerProcess = proc;
+                s_workerIn = proc.StandardInput;
+                s_workerOut = proc.StandardOutput;
+            }
+        }
+
+        private static void ShutdownPreviewWorker()
+        {
+            lock (WorkerLifecycleLock)
+            {
+                ShutdownPreviewWorkerUnsafe();
+            }
+        }
+
+        private static void ShutdownPreviewWorkerUnsafe()
+        {
+            try
+            {
+                s_workerIn?.Dispose();
+            }
+            catch
+            {
+                // Ignore pipe cleanup errors.
+            }
+
+            try
+            {
+                s_workerOut?.Dispose();
+            }
+            catch
+            {
+                // Ignore pipe cleanup errors.
+            }
+
+            if (s_workerProcess != null)
+            {
+                try
+                {
+                    if (!s_workerProcess.HasExited && !s_workerProcess.WaitForExit(150))
+                    {
+                        s_workerProcess.Kill(entireProcessTree: true);
+                    }
+                }
+                catch
+                {
+                    // Ignore best-effort worker teardown errors.
+                }
+
+                try
+                {
+                    s_workerProcess.Dispose();
+                }
+                catch
+                {
+                    // Ignore process disposal errors.
+                }
+            }
+
+            s_workerProcess = null;
+            s_workerIn = null;
+            s_workerOut = null;
         }
 
         /// <summary>

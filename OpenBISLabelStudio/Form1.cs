@@ -621,8 +621,8 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            SetControlsEnabled(false);
-            Cursor = Cursors.WaitCursor;
+            // Allow switching object types or opening Settings even while items for a previous selection load.
+            SetSampleQueryControlsEnabled(false);
 
             try
             {
@@ -667,8 +667,7 @@ namespace OpenBISLabelStudio
             {
                 if (!IsDisposed && !Disposing && requestVersion == _typeSelectionRequestVersion)
                 {
-                    SetControlsEnabled(true);
-                    Cursor = Cursors.Default;
+                    SetSampleQueryControlsEnabled(true);
                 }
             }
         }
@@ -687,8 +686,8 @@ namespace OpenBISLabelStudio
             SampleDto selectedSample = _loadedSamples[openbisObjectsComboBox.SelectedIndex];
             long requestVersion = ++_sampleDetailsRequestVersion;
 
-            SetControlsEnabled(false);
-            Cursor = Cursors.WaitCursor;
+            // Allow switching object types or opening Settings even while items for a previous selection load.
+            SetSampleQueryControlsEnabled(false);
 
             try
             {
@@ -928,12 +927,17 @@ namespace OpenBISLabelStudio
             flaskLabelCheckBox.Checked = false;
         }
 
-        private void SetControlsEnabled(bool enabled)
+        private void SetSampleQueryControlsEnabled(bool enabled)
         {
-            openbisTypeComboBox.Enabled = enabled;
             openbisObjectsComboBox.Enabled = enabled;
             loadPrintTemplates.Enabled = enabled;
             btnPrintLabel.Enabled = enabled;
+        }
+
+        private void SetControlsEnabled(bool enabled)
+        {
+            openbisTypeComboBox.Enabled = enabled;
+            SetSampleQueryControlsEnabled(enabled);
             btnSettings.Enabled = enabled;
         }
 

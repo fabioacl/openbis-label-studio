@@ -30,6 +30,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly), LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly),
                 (nameof(CropFallbackExportBitmapTrimsA4AndPreservesNativeSize), CropFallbackExportBitmapTrimsA4AndPreservesNativeSize),
                 (nameof(RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation), RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation),
+                (nameof(PreviewWorkerLoopHandlesRequestsAndErrorsCleanly), PreviewWorkerLoopHandlesRequestsAndErrorsCleanly),
                 (nameof(BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved), BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved),
                 (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
                 (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
@@ -565,6 +566,37 @@ namespace OpenBISLabelStudio.Tests
             });
         }
 
+        private static void PreviewWorkerLoopHandlesRequestsAndErrorsCleanly()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string outPng = Path.Combine(tempRoot, "worker_out.png");
+                string reqJson = Newtonsoft.Json.JsonConvert.SerializeObject(new
+                {
+                    baseDir = tempRoot,
+                    slot = "SmallBox12mm",
+                    profile = "Molecule",
+                    details = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule),
+                    freeText = "",
+                    outPath = outPng
+                });
+
+                string inputLines = "not-valid-json\n" + reqJson + "\n";
+                using var reader = new StringReader(inputLines);
+                using var writer = new StringWriter();
+
+                LabelPreviewRenderer.RunPreviewWorkerLoop(reader, writer);
+
+                string[] responses = writer.ToString().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                AssertEqual(2, responses.Length, "Worker should emit one JSON response per request line before EOF");
+                AssertTrue(responses[0].Contains("\"success\":false", StringComparison.OrdinalIgnoreCase),
+                    $"Malformed line should yield success:false, actual: {responses[0]}");
+                AssertTrue(responses[1].Contains("\"success\":true", StringComparison.OrdinalIgnoreCase),
+                    $"Valid request should yield success:true fallback PNG, actual: {responses[1]}");
+                AssertTrue(File.Exists(outPng), "Worker must write rendered/fallback PNG to outPath");
+            });
+        }
+
         private static void BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved()
         {
             var serverTypes = new[]
@@ -820,6 +852,19 @@ namespace OpenBISLabelStudio.Tests
                     FindControl<Button>(saveForm, "btnPreviewGeneric").PerformClick();
                     AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewMagnet").Image, "Generic Magnet preview image should be populated");
                     AssertTrue(saveForm.Visible, "ObjectTypes page should remain responsive while async previews render");
+
+                    // Verify ApplyServerTypes preserves current row selection instead of jumping back to row 0.
+                    var typesGrid = FindControl<DataGridView>(saveForm, "dgvObjectTypes");
+                    typesGrid.CurrentCell = typesGrid.Rows[1].Cells[1];
+                    saveForm.ApplyServerTypes(new[]
+                    {
+                        new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
+                        new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" },
+                        new OpenBisTypeInfoDto { Code = "SAMPLE", Description = "Sample" }
+                    });
+                    string? activeText = typesGrid.CurrentRow?.Cells[1].Value?.ToString();
+                    AssertTrue(activeText != null && activeText.Contains("CRYSTAL", StringComparison.OrdinalIgnoreCase),
+                        $"ApplyServerTypes must preserve selected row across background sync, actual: {activeText}");
 
                     FindControl<TextBox>(saveForm, "txtInstanceUrl").Text = "https://updated.example.org";
                     FindControl<TextBox>(saveForm, "txtToken").Text = "";

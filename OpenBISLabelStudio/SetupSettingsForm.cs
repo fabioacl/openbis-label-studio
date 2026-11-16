@@ -48,10 +48,13 @@ namespace OpenBISLabelStudio
         private Models.LabelTemplateProfile _activePreviewProfile = Models.LabelTemplateProfile.Molecule;
         private CancellationTokenSource? _previewRenderCts;
         private long _previewRenderVersion;
+        private long _typesFetchVersion;
         private bool _isInitializingInputs;
         private bool _isPopulatingGrid;
         private bool _isBusy;
+        private bool _isLoadingTypes;
         private bool _hasVisitedTypesPage;
+        private bool _hasStartedPage2Previews;
         private bool _cameFromPrintersStep;
         private bool _autoFetchAttemptedForCurrentInputs;
         private bool _resourcesDisposed;
@@ -232,6 +235,9 @@ namespace OpenBISLabelStudio
 
             List<Models.ConfiguredOpenBisType> merged = BuildInitialTypeRows(validServerTypes, existingSnapshot);
 
+            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as TypeRowEntry)?.Code;
+            int firstDisplayedRow = dgvObjectTypes.FirstDisplayedScrollingRowIndex;
+
             _masterTypeRows.Clear();
             foreach (Models.ConfiguredOpenBisType item in merged)
             {
@@ -244,15 +250,17 @@ namespace OpenBISLabelStudio
                 });
             }
 
-            RefreshObjectTypeGrid();
-            Models.LabelTemplateProfile selectedProfile = GetSelectedOrDefaultPreviewProfile();
-            if (IsHandleCreated && _currentStep == Models.SetupWizardStep.ObjectTypes)
+            RefreshObjectTypeGrid(selectedRowCode, firstDisplayedRow);
+            if (_currentStep == Models.SetupWizardStep.ObjectTypes && IsHandleCreated)
             {
-                ShowExamplePreviews(selectedProfile);
+                if (!_hasStartedPage2Previews)
+                {
+                    ShowExamplePreviews(GetSelectedOrDefaultPreviewProfile());
+                }
             }
-            else
+            else if (!_hasStartedPage2Previews)
             {
-                _activePreviewProfile = selectedProfile;
+                _activePreviewProfile = GetSelectedOrDefaultPreviewProfile();
                 UpdatePreviewToggleVisuals();
             }
         }
@@ -292,6 +300,16 @@ namespace OpenBISLabelStudio
             }, out validationError);
         }
 
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+
+            if (_currentStep == Models.SetupWizardStep.ObjectTypes && !_hasStartedPage2Previews)
+            {
+                ShowExamplePreviews(_activePreviewProfile);
+            }
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -305,7 +323,11 @@ namespace OpenBISLabelStudio
 
             if (_currentStep == Models.SetupWizardStep.ObjectTypes)
             {
-                ShowExamplePreviews(_activePreviewProfile);
+                if (!_hasStartedPage2Previews)
+                {
+                    ShowExamplePreviews(_activePreviewProfile);
+                }
+
                 if (CachedServerTypes == null && !_autoFetchAttemptedForCurrentInputs)
                 {
                     _ = LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
@@ -462,6 +484,7 @@ namespace OpenBISLabelStudio
 
             if (_currentStep == Models.SetupWizardStep.ObjectTypes && step != Models.SetupWizardStep.ObjectTypes)
             {
+                _hasStartedPage2Previews = false;
                 CancelPendingPreviewRender();
                 CommitGridEdits();
                 SyncVisibleGridToMaster();
@@ -649,13 +672,14 @@ namespace OpenBISLabelStudio
             return string.IsNullOrWhiteSpace(selected) ? fallbackDefault : selected;
         }
 
-        private void RefreshObjectTypeGrid()
+        private void RefreshObjectTypeGrid(string? preferredRowCode = null, int preferredFirstDisplayedRow = -1)
         {
             _isPopulatingGrid = true;
             try
             {
                 dgvObjectTypes.Rows.Clear();
                 string filter = (txtTypeFilter.Text ?? "").Trim();
+                int targetRowIndex = -1;
 
                 foreach (TypeRowEntry entry in _masterTypeRows)
                 {
@@ -671,6 +695,23 @@ namespace OpenBISLabelStudio
                         entry.DisplayLabel,
                         ProfileToDisplayString(entry.TemplateProfile));
                     dgvObjectTypes.Rows[rowIndex].Tag = entry;
+
+                    if (targetRowIndex == -1
+                        && !string.IsNullOrWhiteSpace(preferredRowCode)
+                        && string.Equals(entry.Code, preferredRowCode, StringComparison.OrdinalIgnoreCase))
+                    {
+                        targetRowIndex = rowIndex;
+                    }
+                }
+
+                if (targetRowIndex >= 0 && targetRowIndex < dgvObjectTypes.Rows.Count)
+                {
+                    dgvObjectTypes.CurrentCell = dgvObjectTypes.Rows[targetRowIndex].Cells[colType.Index];
+                }
+
+                if (preferredFirstDisplayedRow >= 0 && preferredFirstDisplayedRow < dgvObjectTypes.Rows.Count)
+                {
+                    dgvObjectTypes.FirstDisplayedScrollingRowIndex = preferredFirstDisplayedRow;
                 }
             }
             finally
@@ -735,6 +776,13 @@ namespace OpenBISLabelStudio
                 return;
             }
 
+            if (profile == _activePreviewProfile && picPreviewSmallBox.Image != null)
+            {
+                UpdatePreviewToggleVisuals();
+                return;
+            }
+
+            _hasStartedPage2Previews = true;
             long requestVersion = ++_previewRenderVersion;
             CancelPendingPreviewRender();
 
@@ -1115,12 +1163,13 @@ namespace OpenBISLabelStudio
 
         private async Task LoadServerTypesForCurrentPageAsync(bool redirectToConnectionOnExpiredToken)
         {
-            if (_isBusy)
+            if (_isBusy || _isLoadingTypes)
             {
                 return;
             }
 
             _autoFetchAttemptedForCurrentInputs = true;
+            long fetchVersion = ++_typesFetchVersion;
 
             if (!ValidateConnectionInputs(out string url, out string token, out string inputError))
             {
@@ -1136,13 +1185,21 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            SetBusy(true);
-            SetTypesStatus("Loading object types from openBIS...", StatusSeverity.Info);
+            // Keep the Object Types grid, filter, Save, and navigation unlocked so user selection
+            // is never blocked while openBIS types load in the background.
+            SetTypesLoadingState(true);
+            SetTypesStatus("Syncing object types from openBIS...", StatusSeverity.Info);
 
             try
             {
                 Models.OpenBisTypesResult result = await _openBisClient.QueryTypesAsync(url, token);
-                if (IsDisposed || Disposing)
+                if (IsDisposed || Disposing || fetchVersion != _typesFetchVersion)
+                {
+                    return;
+                }
+
+                if (!string.Equals(url, txtInstanceUrl.Text.Trim(), StringComparison.Ordinal)
+                    || !string.Equals(token, txtToken.Text.Trim(), StringComparison.Ordinal))
                 {
                     return;
                 }
@@ -1172,7 +1229,7 @@ namespace OpenBISLabelStudio
             }
             catch (Exception ex)
             {
-                if (!IsDisposed && !Disposing)
+                if (!IsDisposed && !Disposing && fetchVersion == _typesFetchVersion)
                 {
                     string message = $"Offline mode: showing saved object types ({ex.Message})";
                     SetTypesStatus(message, StatusSeverity.Warning);
@@ -1186,7 +1243,7 @@ namespace OpenBISLabelStudio
             {
                 if (!IsDisposed && !Disposing)
                 {
-                    SetBusy(false);
+                    SetTypesLoadingState(false);
                 }
             }
         }
@@ -1212,6 +1269,12 @@ namespace OpenBISLabelStudio
                 : result.Error;
         }
 
+        private void SetTypesLoadingState(bool loading)
+        {
+            _isLoadingTypes = loading;
+            btnRefreshTypes.Enabled = !loading && !_isBusy;
+        }
+
         private void SetBusy(bool busy)
         {
             _isBusy = busy;
@@ -1220,7 +1283,7 @@ namespace OpenBISLabelStudio
             txtToken.ReadOnly = busy;
             btnTestConnection.Enabled = !busy;
             btnNextFinish.Enabled = !busy;
-            btnRefreshTypes.Enabled = !busy;
+            btnRefreshTypes.Enabled = !busy && !_isLoadingTypes;
             btnTabConnection.Enabled = !busy;
             btnTabObjectTypes.Enabled = !busy;
             btnTabPrinters.Enabled = !busy;
@@ -1277,6 +1340,7 @@ namespace OpenBISLabelStudio
             }
 
             ClearFooterError();
+            ++_typesFetchVersion;
             _validatedUrl = "";
             _validatedToken = "";
             _autoFetchAttemptedForCurrentInputs = false;
@@ -1552,7 +1616,7 @@ namespace OpenBISLabelStudio
 
         private async void btnRefreshTypes_Click(object? sender, EventArgs e)
         {
-            if (_isBusy)
+            if (_isBusy || _isLoadingTypes)
             {
                 return;
             }
@@ -1572,13 +1636,10 @@ namespace OpenBISLabelStudio
 
         private void txtTypeFilter_TextChanged(object? sender, EventArgs e)
         {
+            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as TypeRowEntry)?.Code;
             CommitGridEdits();
             SyncVisibleGridToMaster();
-            RefreshObjectTypeGrid();
-            if (IsHandleCreated && _currentStep == Models.SetupWizardStep.ObjectTypes)
-            {
-                ShowExamplePreviews(GetSelectedOrDefaultPreviewProfile());
-            }
+            RefreshObjectTypeGrid(selectedRowCode);
         }
 
         private void dgvObjectTypes_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
@@ -1615,7 +1676,7 @@ namespace OpenBISLabelStudio
             else if (e.ColumnIndex == colStyle.Index)
             {
                 entry.TemplateProfile = DisplayStringToProfile(row.Cells[colStyle.Index].Value?.ToString());
-                if (IsHandleCreated)
+                if (IsHandleCreated && entry.TemplateProfile != _activePreviewProfile)
                 {
                     ShowExamplePreviews(entry.TemplateProfile);
                 }
@@ -1629,7 +1690,10 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            if (dgvObjectTypes.CurrentRow?.Tag is TypeRowEntry entry && IsHandleCreated)
+            if (dgvObjectTypes.CurrentRow?.Tag is TypeRowEntry entry
+                && IsHandleCreated
+                && _currentStep == Models.SetupWizardStep.ObjectTypes
+                && entry.TemplateProfile != _activePreviewProfile)
             {
                 ShowExamplePreviews(entry.TemplateProfile);
             }
