@@ -9,17 +9,19 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
 - **Guided First-Run Setup Wizard (`SetupSettingsForm`)**:
   - Automatically runs on first launch (or whenever required configuration files under `config/` are missing/invalid):
     1. **Connection**: Enter your openBIS instance URL and Personal Access Token (`Show token` toggle + live **Test Connection** check via `openbis_fetch.py --types`).
-    2. **Object Types & Template Profiles**: Filterable object type picker fetched from openBIS where each enabled type is mapped to either **Molecule / Substance** (`Molecule`) or **Generic / Free-text** (`Generic`), with live example label previews rendered directly from `templates/*.lbx`.
+    2. **Object Types & Template Profiles**: Filterable object type picker showing saved types immediately while syncing from openBIS asynchronously in the background. Each enabled type maps to **Molecule / Substance** (`Molecule`) or **Generic / Free-text** (`Generic`), while live example label previews render from `templates/*.lbx` in an isolated `--preview-worker` process without blocking type selection.
     3. **Printer Routing**: Map Windows printer queues to the **Small Box (12mm)**, **Magnet (12mm)**, and **Flask (24mm)** label slots (with graceful fallback if no printers are detected).
   - Canceling initial setup while required configs are incomplete exits cleanly instead of opening an unconfigured main window.
 
 - **openBIS Integration via `pybis` (`openbis_fetch.py` + `OpenBisClient`)**:
   - Queries available openBIS object types, samples sorted by latest modification date, and sample details (`studied_by` full name/username, storage location, supplier name, `Spreadsheet` evaporation temperature with units, special storage conditions, and parent `ELN_PREVIEW` images).
+  - Switching object types in the main window cancels stale requests and keeps the object-type selector and **Settings...** button responsive while samples load.
   - Writes Python query outputs to isolated temporary files (`--out`) and classifies errors into `token_expired`, `connection_error`, and `unknown_error`.
   - **Expired-Token Recovery**: When startup or runtime queries fail with `token_expired`, an inline recovery prompt pre-fills the openBIS URL, clears/focuses the token input, validates and saves the new token, and automatically retries the failed query.
   - **Offline Resilience**: If openBIS is unreachable on startup (`connection_error`), cached `displayName` entries from `config/openbis_types.json` remain usable alongside a non-fatal status banner.
 
 - **Profile-Based Brother Label Templates (`OpenBISLabelStudio/templates/`)**:
+  - Previews run in an out-of-process `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes), crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions, and fall back to an installed local printer (such as `Microsoft Print to PDF`) if no Brother PT-P700 driver is installed.
   - **Molecule profile (`Molecule`)**:
     - `template_molecule_box_12mm.lbx` — Sample name, PermID QR code, researcher username.
     - `template_molecule_magnet_12mm.lbx` — Sample name, PermID QR code, researcher full name, evaporation temperature, and special storage hazard/condition icons.
@@ -51,19 +53,25 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
 ## Project Layout & Configuration
 
 ```text
-OpenBISLabelStudio/
-├── Models/                 # DTOs and enums (LabelTemplateProfile, ConfiguredOpenBisType, etc.)
-├── Services/               # AppConfigService, OpenBisClient, LabelPreviewRenderer
-├── templates/              # Tracked Brother .lbx label templates (copied to output/templates/)
-├── Form1.cs                # Main window orchestration
-├── SetupSettingsForm.cs    # Unified Wizard, Expired-Token Recovery, and Settings dialog
-├── openbis_fetch.py        # pybis CLI wrapper (--types, <TYPE>, --details <PERM_ID>, --out)
-└── openbis_config.example.json
+.
+├── OpenBISLabelStudio.slnx              # Visual Studio solution
+├── OpenBISLabelStudio/
+│   ├── Models/                          # DTOs and enums (LabelTemplateProfile, ConfiguredOpenBisType, etc.)
+│   ├── Services/                        # AppConfigService, OpenBisClient, LabelPreviewRenderer
+│   ├── templates/                       # Tracked Brother .lbx templates (copied to output/templates/)
+│   ├── Properties/PublishProfiles/      # Publish profile (FolderProfile.pubxml)
+│   ├── Form1.cs                         # Main window orchestration
+│   ├── Program.cs                       # App entry point and --preview-worker host
+│   ├── SetupSettingsForm.cs             # Unified Wizard, Expired-Token Recovery, and Settings dialog
+│   └── openbis_fetch.py                 # pybis CLI wrapper (--types, <TYPE>, --details <PERM_ID>, --out)
+├── OpenBISLabelStudio.Tests/            # C# unit and WinForms integration tests (Program.cs)
+├── tests/                               # Python pybis wrapper tests (test_openbis_fetch.py)
+└── docs/superpowers/                    # Design specification and implementation plan
 ```
 
-Runtime configuration files are stored in a git-ignored `config/` directory next to the executable (`AppDomain.CurrentDomain.BaseDirectory\config\`) and are created automatically by the setup wizard:
+Runtime configuration files are stored in a git-ignored `config/` directory next to the executable (`AppDomain.CurrentDomain.BaseDirectory\config\`) and are created automatically by the setup wizard on first launch (any legacy root-level JSON files in the application directory are ignored):
 
-- `config/openbis_config.json` — openBIS instance URL and personal access token (see `OpenBISLabelStudio/openbis_config.example.json` for schema reference):
+- `config/openbis_config.json` — openBIS instance URL and personal access token:
   ```json
   {
     "openbisUrl": "https://openbis.your-institution.ch",
