@@ -1,3 +1,6 @@
+from collections import OrderedDict
+import contextlib
+import io
 import sys
 import json
 import os
@@ -190,9 +193,9 @@ def extract_evaporation_temperature(spreadsheet):
     return ""
 
 
-def fetch_sample_types(openbis_url, token):
+def fetch_sample_types(openbis_url, token, session=None):
     try:
-        o = create_openbis_connection(openbis_url, token)
+        o = session if session is not None else create_openbis_connection(openbis_url, token)
         types = o.get_sample_types()
         df = types.df
         type_list = []
@@ -210,9 +213,9 @@ def fetch_sample_types(openbis_url, token):
         return {"success": False, "errorType": classify_error(e), "error": str(e)}
 
 
-def fetch_samples_by_type(openbis_url, token, sample_type):
+def fetch_samples_by_type(openbis_url, token, sample_type, session=None):
     try:
-        o = create_openbis_connection(openbis_url, token)
+        o = session if session is not None else create_openbis_connection(openbis_url, token)
         samples = o.get_samples(type=sample_type)
 
         result_list = []
@@ -262,9 +265,9 @@ def _find_first_image_file(directory: str) -> str:
     return ""
 
 
-def fetch_sample_details(openbis_url, token, perm_id, skip_eln: bool = False):
+def fetch_sample_details(openbis_url, token, perm_id, skip_eln: bool = False, session=None):
     try:
-        o = create_openbis_connection(openbis_url, token)
+        o = session if session is not None else create_openbis_connection(openbis_url, token)
 
         # Get specific sample by permId
         sample = o.get_sample(perm_id)
@@ -434,14 +437,168 @@ def parse_cli_args(argv: list[str]) -> tuple[str, str, str, str | None, str]:
     return url, token, mode_or_type, perm_id, out_path
 
 
+class WorkerSessionCache:
+    """Caches authenticated pyBIS Openbis clients keyed by (url, token) for worker reuse."""
+
+    def __init__(self, max_entries: int = 8):
+        self._max_entries = max(1, max_entries)
+        self._sessions: OrderedDict[tuple[str, str], object] = OrderedDict()
+
+    def _key(self, url: str, token: str) -> tuple[str, str]:
+        return (str(url or "").strip(), str(token or ""))
+
+    def clear(self) -> None:
+        self._sessions.clear()
+
+    def invalidate(self, url: str, token: str) -> None:
+        self._sessions.pop(self._key(url, token), None)
+
+    def execute(self, url: str, token: str, fn) -> dict:
+        """
+        Executes fn(session) using a cached session when present.
+        If a cached session fails, evicts it immediately and retries once with a fresh session
+        unless the failure is an expired/invalid token.
+        """
+        key = self._key(url, token)
+        cached_session = self._sessions.get(key)
+
+        if cached_session is not None:
+            self._sessions.move_to_end(key)
+            try:
+                result = fn(cached_session)
+            except Exception as exc:
+                result = {"success": False, "errorType": classify_error(exc), "error": str(exc)}
+
+            if result.get("success"):
+                return result
+
+            self._sessions.pop(key, None)
+            if result.get("errorType") == "token_expired":
+                return result
+
+        try:
+            session = create_openbis_connection(url, token)
+            result = fn(session)
+        except Exception as exc:
+            return {"success": False, "errorType": classify_error(exc), "error": str(exc)}
+
+        if result.get("success"):
+            self._sessions[key] = session
+            self._sessions.move_to_end(key)
+            while len(self._sessions) > self._max_entries:
+                self._sessions.popitem(last=False)
+
+        return result
+
+
+def _dispatch_worker_request(req: dict, session_cache: WorkerSessionCache) -> dict:
+    action = req.get("action")
+    url = str(req.get("url") or "")
+    token = str(req.get("token") or "")
+
+    if action == "check":
+        return check_connection(url, token)
+    if action == "types":
+        return session_cache.execute(
+            url,
+            token,
+            lambda s: fetch_sample_types(url, token, session=s),
+        )
+    if action == "list":
+        sample_type = str(req.get("sampleType") or "")
+        if not sample_type:
+            raise ValueError("Missing sampleType for list action.")
+        return session_cache.execute(
+            url,
+            token,
+            lambda s: fetch_samples_by_type(url, token, sample_type, session=s),
+        )
+    if action == "details":
+        perm_id = str(req.get("permId") or "")
+        if not perm_id:
+            raise ValueError("Missing permId for details action.")
+        skip_eln = bool(req.get("skipEln", False))
+        return session_cache.execute(
+            url,
+            token,
+            lambda s: fetch_sample_details(url, token, perm_id, skip_eln=skip_eln, session=s),
+        )
+
+    raise ValueError(f"Unsupported worker action: {action!r}")
+
+
+def run_worker_loop(stdin_stream=None, stdout_stream=None) -> int:
+    """
+    Runs the persistent single-line JSON stdio worker loop until EOF.
+    Reads one JSON request per line, dispatches openBIS queries reusing cached sessions,
+    and writes one JSON response line per request without printing stray stdout text.
+    """
+    in_stream = stdin_stream if stdin_stream is not None else sys.stdin
+    out_stream = stdout_stream if stdout_stream is not None else sys.stdout
+    session_cache = WorkerSessionCache()
+    redirect_target = sys.stderr if sys.stderr is not None else io.StringIO()
+
+    while True:
+        line = in_stream.readline()
+        if line == "":
+            break
+
+        stripped = line.lstrip("\ufeff").strip()
+        if not stripped:
+            continue
+
+        try:
+            req = json.loads(stripped)
+            if not isinstance(req, dict):
+                raise ValueError("Worker request must be a JSON object.")
+        except (json.JSONDecodeError, ValueError) as exc:
+            result = {
+                "success": False,
+                "errorType": "unknown_error",
+                "error": f"Invalid JSON request: {exc}",
+            }
+        else:
+            try:
+                with contextlib.redirect_stdout(redirect_target):
+                    result = _dispatch_worker_request(req, session_cache)
+            except Exception as exc:
+                result = {
+                    "success": False,
+                    "errorType": classify_error(exc),
+                    "error": str(exc),
+                }
+
+        out_stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+        out_stream.flush()
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """
-    Main entry point for CLI execution. Writes JSON results to out_path and returns exit code:
+    Main entry point for CLI and --worker execution.
+    In CLI mode writes JSON results to out_path and returns exit code:
       - 0 on successful fetch execution (even if openBIS returns an error object)
       - 1 on malformed arguments or unhandled script failure
     """
     if argv is None:
         argv = sys.argv
+
+    args_without_exe = list(argv)
+    if args_without_exe:
+        first_lower = args_without_exe[0].lower()
+        if first_lower.endswith(".py") or first_lower in ("python", "python3") or first_lower.endswith("python.exe"):
+            args_without_exe = args_without_exe[1:]
+
+    if args_without_exe and args_without_exe[0] == "--worker":
+        for stream in (sys.stdin, sys.stdout):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                try:
+                    reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+        return run_worker_loop(sys.stdin, sys.stdout)
 
     skip_eln = "--skip-eln" in argv
 

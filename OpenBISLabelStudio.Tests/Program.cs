@@ -26,6 +26,9 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(FindBestPrinterIndexHandlesZeroPrinters), FindBestPrinterIndexHandlesZeroPrinters),
                 (nameof(OpenBisClientSurfacesStderrWhenPythonFails), OpenBisClientSurfacesStderrWhenPythonFails),
                 (nameof(OpenBisClientExecutesScriptAndCleansTempOutput), OpenBisClientExecutesScriptAndCleansTempOutput),
+                (nameof(OpenBisClientWorkerReusesPersistentPythonProcessAcrossQueries), OpenBisClientWorkerReusesPersistentPythonProcessAcrossQueries),
+                (nameof(OpenBisClientWorkerHandlesMidSessionCrashAndCorruptStdoutCleanly), OpenBisClientWorkerHandlesMidSessionCrashAndCorruptStdoutCleanly),
+                (nameof(OpenBisClientFallsBackToCliWhenStubScriptRejectsWorker), OpenBisClientFallsBackToCliWhenStubScriptRejectsWorker),
                 (nameof(BuildExampleSampleDetailsMatchesProfile), BuildExampleSampleDetailsMatchesProfile),
                 (nameof(RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing), RenderTemplatePreviewReturnsFallbackBitmapWhenTemplateMissing),
                 (nameof(LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly), LbxPaperSizeAndFallbackPrinterHelpersWorkCorrectly),
@@ -360,6 +363,212 @@ namespace OpenBISLabelStudio.Tests
 
                 string thirdRecordedOutPath = File.ReadAllText(recordFile).Trim();
                 AssertFalse(File.Exists(thirdRecordedOutPath), $"Third temp JSON output file must be deleted: {thirdRecordedOutPath}");
+            });
+        }
+
+        private static void OpenBisClientWorkerReusesPersistentPythonProcessAcrossQueries()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string startupCountFile = Path.Combine(tempRoot, "worker_starts.txt");
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, os, sys\n" +
+                    "if '--worker' not in sys.argv[1:]:\n" +
+                    "    sys.stderr.write('Expected --worker mode\\n')\n" +
+                    "    sys.exit(2)\n" +
+                    $"count_path = r'''{startupCountFile}'''\n" +
+                    "count = 0\n" +
+                    "if os.path.exists(count_path):\n" +
+                    "    with open(count_path, 'r', encoding='utf-8') as f:\n" +
+                    "        count = int(f.read().strip() or '0')\n" +
+                    "with open(count_path, 'w', encoding='utf-8') as f:\n" +
+                    "    f.write(str(count + 1))\n" +
+                    "while True:\n" +
+                    "    line = sys.stdin.readline()\n" +
+                    "    if line == '':\n" +
+                    "        break\n" +
+                    "    line = line.strip()\n" +
+                    "    if not line:\n" +
+                    "        continue\n" +
+                    "    req = json.loads(line)\n" +
+                    "    action = req.get('action')\n" +
+                    "    if action == 'check':\n" +
+                    "        resp = {'success': True, 'sessionActive': True}\n" +
+                    "    elif action == 'types':\n" +
+                    "        resp = {'success': True, 'types': [{'code': 'SUBSTANCE', 'description': 'Substance'}]}\n" +
+                    "    elif action == 'details':\n" +
+                    "        resp = {'success': True, 'details': {'permId': req.get('permId', ''), 'name': 'CuPc', 'sampleType': 'SUBSTANCE', 'elnPreviewPath': 'skipped' if req.get('skipEln') else 'full'}}\n" +
+                    "    else:\n" +
+                    "        resp = {'success': False, 'errorType': 'unknown_error', 'error': 'unexpected action'}\n" +
+                    "    sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "    sys.stdout.flush()\n");
+
+                // Missing script and missing Python binary must not spawn hanging workers or throw during warmup.
+                using (var missingScriptClient = new OpenBisClient(Path.Combine(tempRoot, "missing-dir")))
+                {
+                    missingScriptClient.WarmUpWorkerInBackground();
+                }
+
+                using (var missingPythonClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz"))
+                {
+                    missingPythonClient.WarmUpWorkerInBackground();
+                }
+
+                using (var client = new OpenBisClient(tempRoot))
+                {
+                    client.WarmUpWorkerInBackground();
+
+                    ModelTypes.OpenBisConnectionResult checkResult = client.CheckConnectionAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                    AssertTrue(checkResult.Success && checkResult.SessionActive, $"CheckConnectionAsync must succeed via worker, error: {checkResult.Error}");
+
+                    ModelTypes.OpenBisTypesResult typesResult = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                    AssertTrue(typesResult.Success, $"QueryTypesAsync must succeed via worker, error: {typesResult.Error}");
+                    AssertEqual(1, typesResult.Types.Count, "Expected 1 type from worker");
+                    AssertEqual("SUBSTANCE", typesResult.Types[0].Code, "Expected SUBSTANCE type code");
+
+                    ModelTypes.OpenBisDetailsResult detailsResult = client.QuerySampleDetailsAsync("https://openbis.example.org", "tok", "P-1", skipElnPreview: true).GetAwaiter().GetResult();
+                    AssertTrue(detailsResult.Success && detailsResult.Details?.ElnPreviewPath == "skipped",
+                        $"QuerySampleDetailsAsync should forward skipEln=true to worker, error: {detailsResult.Error}");
+
+                    AssertTrue(File.Exists(startupCountFile), "Worker startup count file must exist");
+                    AssertEqual("1", File.ReadAllText(startupCountFile).Trim(), "Persistent worker should only be started once across warmup and queries");
+
+                    client.ShutdownWorker();
+                    ModelTypes.OpenBisConnectionResult afterShutdown = client.CheckConnectionAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                    AssertTrue(afterShutdown.Success, $"Query after ShutdownWorker should respawn worker cleanly, error: {afterShutdown.Error}");
+                    AssertEqual("2", File.ReadAllText(startupCountFile).Trim(), "Expected fresh worker start after ShutdownWorker");
+                }
+
+                // Also verify real Backend openbis_fetch.py --worker pipe round-trip when present in output directory.
+                if (File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "openbis_fetch.py")))
+                {
+                    using var realClient = new OpenBisClient();
+                    ModelTypes.OpenBisConnectionResult emptyTokCheck = realClient.CheckConnectionAsync("https://openbis.example.org", "").GetAwaiter().GetResult();
+                    AssertFalse(emptyTokCheck.Success, "Real worker should reject empty token");
+                    AssertEqual("token_expired", emptyTokCheck.ErrorType, "Real worker empty token should return token_expired");
+
+                    ModelTypes.OpenBisConnectionResult httpCheck = realClient.CheckConnectionAsync("http://openbis.example.org", "tok").GetAwaiter().GetResult();
+                    AssertFalse(httpCheck.Success, "Real worker should reject http:// URL");
+                    AssertEqual("connection_error", httpCheck.ErrorType, "Real worker http:// URL should return connection_error");
+
+                    ModelTypes.OpenBisTypesResult emptyTokTypes = realClient.QueryTypesAsync("https://openbis.example.org", "").GetAwaiter().GetResult();
+                    AssertFalse(emptyTokTypes.Success, "Real worker --types should reject empty token");
+                    AssertEqual("token_expired", emptyTokTypes.ErrorType, "Real worker --types empty token should return token_expired");
+                }
+            });
+        }
+
+        private static void OpenBisClientWorkerHandlesMidSessionCrashAndCorruptStdoutCleanly()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string reqCountFile = Path.Combine(tempRoot, "req_count.txt");
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, os, sys\n" +
+                    "if '--worker' not in sys.argv[1:]:\n" +
+                    "    sys.stderr.write('Expected --worker mode\\n')\n" +
+                    "    sys.exit(2)\n" +
+                    $"req_path = r'''{reqCountFile}'''\n" +
+                    "def next_req():\n" +
+                    "    n = 0\n" +
+                    "    if os.path.exists(req_path):\n" +
+                    "        with open(req_path, 'r', encoding='utf-8') as f:\n" +
+                    "            n = int(f.read().strip() or '0')\n" +
+                    "    n += 1\n" +
+                    "    with open(req_path, 'w', encoding='utf-8') as f:\n" +
+                    "        f.write(str(n))\n" +
+                    "    return n\n" +
+                    "while True:\n" +
+                    "    line = sys.stdin.readline()\n" +
+                    "    if line == '':\n" +
+                    "        break\n" +
+                    "    if not line.strip():\n" +
+                    "        continue\n" +
+                    "    n = next_req()\n" +
+                    "    if n == 1:\n" +
+                    "        sys.stdout.write(json.dumps({'success': True, 'sessionActive': True}) + '\\n')\n" +
+                    "        sys.stdout.flush()\n" +
+                    "    elif n == 2:\n" +
+                    "        sys.stdout.write('<<<corrupt-json>>>\\n')\n" +
+                    "        sys.stdout.flush()\n" +
+                    "        sys.exit(1)\n" +
+                    "    elif n == 3:\n" +
+                    "        sys.stdout.write(json.dumps({'success': True, 'types': [{'code': 'CRYSTAL', 'description': 'Crystal'}]}) + '\\n')\n" +
+                    "        sys.stdout.flush()\n" +
+                    "    elif n == 4:\n" +
+                    "        sys.stderr.write('mid-session crash boom\\n')\n" +
+                    "        sys.stderr.flush()\n" +
+                    "        sys.exit(1)\n" +
+                    "    else:\n" +
+                    "        sys.stdout.write(json.dumps({'success': True, 'data': [{'name': 'Sample-X', 'permId': 'P-1', 'modificationDate': '2026-11-20'}]}) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                using var client = new OpenBisClient(tempRoot);
+                ModelTypes.OpenBisConnectionResult r1 = client.CheckConnectionAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertTrue(r1.Success && r1.SessionActive, $"Request 1 should succeed, error: {r1.Error}");
+
+                ModelTypes.OpenBisTypesResult r2 = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertFalse(r2.Success, "Request 2 with corrupt stdout must fail");
+                AssertEqual("unknown_error", r2.ErrorType, "Request 2 corrupt stdout must return unknown_error");
+
+                ModelTypes.OpenBisTypesResult r3 = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertTrue(r3.Success, $"Request 3 should succeed on respawned worker, error: {r3.Error}");
+                AssertEqual(1, r3.Types.Count, "Request 3 expected 1 type");
+                AssertEqual("CRYSTAL", r3.Types[0].Code, "Request 3 expected CRYSTAL type");
+
+                ModelTypes.OpenBisListResult r4 = client.QuerySamplesByTypeAsync("https://openbis.example.org", "tok", "CRYSTAL").GetAwaiter().GetResult();
+                AssertFalse(r4.Success, "Request 4 abrupt worker exit must fail");
+                AssertEqual("unknown_error", r4.ErrorType, "Request 4 abrupt worker exit must return unknown_error");
+                AssertTrue(r4.Error.Contains("boom", StringComparison.OrdinalIgnoreCase),
+                    $"Request 4 should surface worker stderr crash message, actual: {r4.Error}");
+
+                ModelTypes.OpenBisListResult r5 = client.QuerySamplesByTypeAsync("https://openbis.example.org", "tok", "CRYSTAL").GetAwaiter().GetResult();
+                AssertTrue(r5.Success, $"Request 5 should succeed on freshly respawned worker, error: {r5.Error}");
+                AssertEqual(1, r5.Data.Count, "Request 5 expected 1 sample");
+                AssertEqual("Sample-X", r5.Data[0].Name, "Request 5 expected Sample-X");
+            });
+        }
+
+        private static void OpenBisClientFallsBackToCliWhenStubScriptRejectsWorker()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string invocationsFile = Path.Combine(tempRoot, "invocations.log");
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "args = sys.argv[1:]\n" +
+                    $"with open(r'''{invocationsFile}''', 'a', encoding='utf-8') as lf:\n" +
+                    "    lf.write(' '.join(args) + '\\n')\n" +
+                    "if args == ['--worker']:\n" +
+                    "    sys.stderr.write('Invalid arguments\\n')\n" +
+                    "    sys.exit(1)\n" +
+                    "if '--types' in args and '--out' in args:\n" +
+                    "    out_path = args[args.index('--out') + 1]\n" +
+                    "    with open(out_path, 'w', encoding='utf-8') as f:\n" +
+                    "        json.dump({'success': True, 'types': [{'code': 'SUBSTANCE', 'description': 'Substance'}]}, f)\n" +
+                    "    sys.exit(0)\n" +
+                    "sys.stderr.write('Unsupported args\\n')\n" +
+                    "sys.exit(1)\n");
+
+                using var client = new OpenBisClient(tempRoot);
+                ModelTypes.OpenBisTypesResult res1 = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertTrue(res1.Success, $"First QueryTypesAsync should fall back to CLI and succeed, error: {res1.Error}");
+                AssertEqual(1, res1.Types.Count, "Expected 1 type from CLI fallback");
+
+                ModelTypes.OpenBisTypesResult res2 = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                AssertTrue(res2.Success, $"Second QueryTypesAsync should succeed via CLI, error: {res2.Error}");
+
+                AssertTrue(File.Exists(invocationsFile), "Invocation log should exist");
+                string[] lines = File.ReadAllLines(invocationsFile);
+                AssertEqual(3, lines.Length, $"Expected 1 --worker attempt + 2 CLI invocations, got {lines.Length}");
+                AssertEqual("--worker", lines[0], "First invocation should attempt --worker");
+                AssertTrue(lines[1].Contains("--types", StringComparison.Ordinal) && lines[1].Contains("--out", StringComparison.Ordinal),
+                    $"Second invocation should be CLI fallback, actual: {lines[1]}");
+                AssertTrue(lines[2].Contains("--types", StringComparison.Ordinal) && lines[2].Contains("--out", StringComparison.Ordinal),
+                    $"Third invocation should go straight to CLI once --worker is unsupported, actual: {lines[2]}");
             });
         }
 

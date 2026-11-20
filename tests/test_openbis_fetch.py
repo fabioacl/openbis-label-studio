@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 from pathlib import Path
@@ -267,4 +268,164 @@ def test_main_dispatches_check_and_skip_eln_modes(tmp_path):
     assert code2 == 0
     mock_det.assert_called_once_with("https://x", "tok", "PERM-1", skip_eln=True)
 
+
+def test_run_worker_loop_reuses_session_for_matching_credentials_and_dispatches_all_actions(tmp_path):
+    cache_root = tmp_path / "openbis_eln_cache" / "DS-1"
+    cache_root.mkdir(parents=True)
+    cached_png = cache_root / "structure.png"
+    cached_png.write_bytes(b"png-bytes")
+
+    class FakeTypesDf:
+        def iterrows(self):
+            return iter([(0, {"code": "SUBSTANCE", "description": "Chemical Substance"})])
+
+    sample_item = MagicMock(permId="SMP-1", modificationDate="2026-11-13")
+    sample_item.props.return_value = {"empa_number": "EMPA-1", "batch": "A"}
+
+    parent_sample = MagicMock()
+    parent_sample.type = "MOLECULE"
+    ds = MagicMock()
+    ds.type = "ELN_PREVIEW"
+    ds.permId = "DS-1"
+    parent_sample.get_datasets.return_value = [ds]
+
+    det_sample = MagicMock()
+    det_sample.permId = "SMP-1"
+    det_sample.type = "SUBSTANCE"
+    det_sample.props.return_value = {"empa_number": "EMPA-1", "batch": "A"}
+    det_sample.parents = ["MOLE-1"]
+
+    client_tok1 = MagicMock()
+    client_tok1.get_sample_types.return_value = MagicMock(df=FakeTypesDf())
+    client_tok1.get_samples.return_value = [sample_item]
+    client_tok1.get_sample.side_effect = lambda pid: det_sample if pid == "SMP-1" else parent_sample
+
+    client_tok2 = MagicMock()
+    client_tok2.get_samples.return_value = [sample_item]
+
+    resp_check = MagicMock()
+    resp_check.json.return_value = {"jsonrpc": "2.0", "id": "1", "result": True}
+    resp_check.raise_for_status.return_value = None
+
+    requests_lines = "\n".join([
+        json.dumps({"action": "check", "url": "https://openbis.example.org", "token": "tok-1"}),
+        json.dumps({"action": "types", "url": "https://openbis.example.org", "token": "tok-1"}),
+        json.dumps({"action": "list", "url": "https://openbis.example.org", "token": "tok-1", "sampleType": "SUBSTANCE"}),
+        json.dumps({"action": "details", "url": "https://openbis.example.org", "token": "tok-1", "permId": "SMP-1", "skipEln": False}),
+        json.dumps({"action": "details", "url": "https://openbis.example.org", "token": "tok-1", "permId": "SMP-1", "skipEln": True}),
+        json.dumps({"action": "list", "url": "https://openbis.example.org", "token": "tok-2", "sampleType": "SUBSTANCE"}),
+    ]) + "\n"
+
+    stdin_buf = io.StringIO(requests_lines)
+    stdout_buf = io.StringIO()
+
+    with patch.object(openbis_fetch.requests, "post", return_value=resp_check) as mock_post:
+        with patch.object(
+            openbis_fetch,
+            "create_openbis_connection",
+            side_effect=lambda url, tok: client_tok1 if tok == "tok-1" else client_tok2,
+        ) as mock_connect:
+            with patch.object(openbis_fetch.tempfile, "gettempdir", return_value=str(tmp_path)):
+                exit_code = openbis_fetch.run_worker_loop(stdin_buf, stdout_buf)
+
+    assert exit_code == 0
+    assert mock_post.call_count == 1
+    assert mock_connect.call_count == 2
+
+    responses = [json.loads(line) for line in stdout_buf.getvalue().splitlines() if line.strip()]
+    assert len(responses) == 6
+    assert all(item["success"] is True for item in responses)
+    assert responses[0]["sessionActive"] is True
+    assert responses[1]["types"] == [{"code": "SUBSTANCE", "description": "Chemical Substance"}]
+    assert responses[2]["data"][0]["name"] == "EMPA-1A"
+    assert responses[3]["details"]["elnPreviewPath"] == str(cached_png.resolve())
+    assert responses[4]["details"]["elnPreviewPath"] == ""
+    assert responses[5]["data"][0]["permId"] == "SMP-1"
+
+
+def test_run_worker_loop_handles_invalid_json_without_crashing():
+    resp_check = MagicMock()
+    resp_check.json.return_value = {"jsonrpc": "2.0", "id": "1", "result": True}
+    resp_check.raise_for_status.return_value = None
+
+    stdin_buf = io.StringIO(
+        "not-valid-json\n"
+        "\n"
+        + json.dumps({"action": "check", "url": "https://openbis.example.org", "token": "tok-1"})
+        + "\n"
+    )
+    stdout_buf = io.StringIO()
+
+    with patch.object(openbis_fetch.requests, "post", return_value=resp_check):
+        exit_code = openbis_fetch.run_worker_loop(stdin_buf, stdout_buf)
+
+    assert exit_code == 0
+    responses = [json.loads(line) for line in stdout_buf.getvalue().splitlines() if line.strip()]
+    assert len(responses) == 2
+    assert responses[0]["success"] is False
+    assert responses[0]["errorType"] == "unknown_error"
+    assert responses[1] == {"success": True, "sessionActive": True}
+
+
+def test_run_worker_loop_evicts_broken_cached_session_and_retries_once():
+    stale_client = MagicMock()
+    stale_client.get_samples.side_effect = requests.exceptions.ConnectionError("stale keep-alive socket")
+
+    fresh_sample = MagicMock(permId="SMP-2", modificationDate="2026-11-14")
+    fresh_sample.props.return_value = {"name": "Recovered"}
+    fresh_client = MagicMock()
+    fresh_client.get_samples.return_value = [fresh_sample]
+
+    expired_client = MagicMock()
+    expired_client.get_samples.side_effect = openbis_fetch.InvalidTokenError("Session token expired")
+
+    # 1. Establish cached session via types, 2. Fail on stale socket -> evict & retry once -> succeed,
+    # 3. Fail with token_expired -> evict without retaining broken session -> next call creates new session.
+    class FakeTypesDf:
+        def iterrows(self):
+            return iter([(0, {"code": "CRYSTAL", "description": "Crystal"})])
+
+    stale_client.get_sample_types.return_value = MagicMock(df=FakeTypesDf())
+    fresh_client.get_sample_types.return_value = MagicMock(df=FakeTypesDf())
+    expired_client.get_sample_types.return_value = MagicMock(df=FakeTypesDf())
+
+    requests_lines = "\n".join([
+        json.dumps({"action": "types", "url": "https://openbis.example.org", "token": "tok-1"}),
+        json.dumps({"action": "list", "url": "https://openbis.example.org", "token": "tok-1", "sampleType": "CRYSTAL"}),
+        json.dumps({"action": "types", "url": "https://openbis.example.org", "token": "tok-2"}),
+        json.dumps({"action": "list", "url": "https://openbis.example.org", "token": "tok-2", "sampleType": "CRYSTAL"}),
+        json.dumps({"action": "list", "url": "https://openbis.example.org", "token": "tok-2", "sampleType": "CRYSTAL"}),
+    ]) + "\n"
+
+    stdin_buf = io.StringIO(requests_lines)
+    stdout_buf = io.StringIO()
+
+    connect_sequence = [stale_client, fresh_client, expired_client, fresh_client]
+    with patch.object(openbis_fetch, "create_openbis_connection", side_effect=connect_sequence) as mock_connect:
+        exit_code = openbis_fetch.run_worker_loop(stdin_buf, stdout_buf)
+
+    assert exit_code == 0
+    assert mock_connect.call_count == 4
+    responses = [json.loads(line) for line in stdout_buf.getvalue().splitlines() if line.strip()]
+    assert len(responses) == 5
+    assert responses[0]["success"] is True
+    assert responses[1]["success"] is True
+    assert responses[1]["data"][0]["name"] == "Recovered"
+    assert responses[2]["success"] is True
+    assert responses[3]["success"] is False
+    assert responses[3]["errorType"] == "token_expired"
+    assert responses[4]["success"] is True
+
+
+def test_main_dispatches_worker_flag(monkeypatch):
+    mock_worker = MagicMock(return_value=0)
+    mock_parse = MagicMock(side_effect=AssertionError("parse_cli_args must not be called for --worker"))
+    monkeypatch.setattr(openbis_fetch, "run_worker_loop", mock_worker, raising=False)
+    monkeypatch.setattr(openbis_fetch, "parse_cli_args", mock_parse)
+
+    exit_code = openbis_fetch.main(["openbis_fetch.py", "--worker"])
+
+    assert exit_code == 0
+    mock_worker.assert_called_once()
+    mock_parse.assert_not_called()
 
