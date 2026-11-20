@@ -4,6 +4,20 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
 
 ---
 
+## Architecture Overview
+
+The solution separates backend logic from the desktop UI across two main projects:
+
+- **`OpenBISLabelStudio.Backend`** (`.NET 10` class library):
+  - Owns all configuration, openBIS integration, label preview rendering, token recovery coordination, and b-PAC printing behind the `ILabelStudioBackend` facade (`LabelStudioBackend`).
+  - Owns the Brother b-PAC COM reference (`bpac`), `Newtonsoft.Json`, `openbis_fetch.py`, and Brother `.lbx` templates (`templates/`).
+  - Communicates with openBIS via a persistent `openbis_fetch.py --worker` stdio JSON loop in `OpenBisClient` (keeping the `pybis` session warm across calls, with transparent fallback to isolated one-shot `--out` CLI invocations).
+- **`OpenBISLabelStudio`** (thin `.NET 10` WinForms frontend):
+  - Contains only UI presentation and user interaction (`Program.cs`, `Form1`, `SetupSettingsForm`, `FormTokenRecoveryPrompter`), consuming `ILabelStudioBackend` with no direct dependency on `bpac` or `Newtonsoft.Json`.
+  - Also hosts the out-of-process `--preview-worker` entry point in `Program.cs` (delegating to `LabelStudioBackend.RunPreviewWorkerLoop`).
+
+---
+
 ## Features
 
 - **Guided First-Run Setup Wizard (`SetupSettingsForm`)**:
@@ -14,13 +28,13 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
   - Canceling initial setup while required configs are incomplete exits cleanly instead of opening an unconfigured main window.
 
 - **openBIS Integration via `pybis` (`openbis_fetch.py` + `OpenBisClient`)**:
-  - Queries available openBIS object types, samples sorted by latest modification date, and sample details (`studied_by` full name/username, storage location, supplier name, `Spreadsheet` evaporation temperature with units, special storage conditions, and cached `ELN_PREVIEW` images).
+  - Runs primarily over a persistent `openbis_fetch.py --worker` stdio JSON loop (with isolated `--out` CLI fallback) to query available openBIS object types, samples sorted by latest modification date, and sample details (`studied_by` full name/username, storage location, supplier name, `Spreadsheet` evaporation temperature with units, special storage conditions, and cached `ELN_PREVIEW` images).
   - Switching object types in the main window displays a loading bar, cancels stale requests, and keeps the object-type selector and **Settings...** button responsive while samples load.
-  - Writes Python query outputs to isolated temporary files (`--out`) and classifies errors into `token_expired`, `connection_error`, and `unknown_error`.
-  - **Expired-Token Recovery**: When startup or runtime queries fail with `token_expired`, an inline recovery prompt pre-fills the openBIS URL, clears/focuses the token input, validates and saves the new token, and automatically retries the failed query.
+  - Classifies errors into `token_expired`, `connection_error`, and `unknown_error`.
+  - **Expired-Token Recovery**: When startup or runtime queries fail with `token_expired`, `TokenRecoveryCoordinator` invokes `FormTokenRecoveryPrompter` (via `ITokenRecoveryPrompter`), pre-filling the openBIS URL, clearing/focusing the token input, validating and saving the new token, and automatically retrying the failed query.
   - **Offline Resilience**: If openBIS is unreachable on startup (`connection_error`), cached `displayName` entries from `config/openbis_types.json` remain usable alongside a non-fatal status banner.
 
-- **Profile-Based Brother Label Templates (`OpenBISLabelStudio/templates/`)**:
+- **Profile-Based Brother Label Templates (`OpenBISLabelStudio.Backend/templates/`)**:
   - Previews and print jobs run in an out-of-process, pre-warmed `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes). Previews crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions and fall back internally to `Microsoft Print to PDF` if no Brother PT-P700 driver is installed (example previews are cached in `%TEMP%` after first render).
   - **Molecule profile (`Molecule`)**:
     - `template_molecule_box_12mm.lbx` — Sample name, PermID QR code, researcher username.
@@ -54,27 +68,34 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
 
 ```text
 .
-├── OpenBISLabelStudio.slnx              # Visual Studio solution
-├── OpenBISLabelStudio/
-│   ├── Models/                          # DTOs and enums (LabelTemplateProfile, ConfiguredOpenBisType, etc.)
-│   ├── Services/                        # AppConfigService, OpenBisClient, LabelPreviewRenderer
-│   ├── templates/                       # Tracked Brother .lbx templates (copied to output/templates/)
-│   ├── Properties/PublishProfiles/      # Publish profile (FolderProfile.pubxml)
-│   ├── Form1.cs                         # Main window orchestration
-│   ├── Program.cs                       # App entry point and --preview-worker host
-│   ├── SetupSettingsForm.cs             # Unified Wizard, Expired-Token Recovery, and Settings dialog
-│   └── openbis_fetch.py                 # pybis CLI wrapper (--types, <TYPE>, --details <PERM_ID>, --out)
-├── OpenBISLabelStudio.Tests/            # C# unit and WinForms integration tests (Program.cs)
-├── tests/                               # Python pybis wrapper tests (test_openbis_fetch.py)
-└── docs/superpowers/                    # Design specification and implementation plan
+├── OpenBISLabelStudio.slnx                  # Visual Studio solution
+├── OpenBISLabelStudio.Backend/              # Backend class library (owns bpac, Newtonsoft.Json, Python & templates)
+│   ├── Contracts/                           # ILabelStudioBackend, ITokenRecoveryPrompter, backend DTOs
+│   ├── Models/                              # ConfigModels (LabelTemplateProfile, ConfiguredOpenBisType, etc.)
+│   ├── Services/                            # LabelStudioBackend, AppConfigService, OpenBisClient, LabelPreviewRenderer, TokenRecoveryCoordinator
+│   ├── templates/                           # Tracked Brother .lbx templates (copied to output/templates/)
+│   ├── OpenBISLabelStudio.Backend.csproj    # References bpac COM + Newtonsoft.Json; copies openbis_fetch.py & templates/
+│   └── openbis_fetch.py                     # pybis worker (--worker) & CLI wrapper (--check, --types, <TYPE>, --details, --out)
+├── OpenBISLabelStudio/                      # Thin WinForms frontend (references OpenBISLabelStudio.Backend only)
+│   ├── Properties/PublishProfiles/          # Publish profile (FolderProfile.pubxml)
+│   ├── Form1.cs / Form1.Designer.cs         # Main window orchestration
+│   ├── FormTokenRecoveryPrompter.cs         # ITokenRecoveryPrompter WinForms adapter
+│   ├── Program.cs                           # App entry point and --preview-worker host
+│   ├── SetupSettingsForm.cs / .Designer.cs  # Unified Wizard, Expired-Token Recovery, and Settings dialog
+│   └── OpenBISLabelStudio.csproj
+├── OpenBISLabelStudio.Tests/                # C# unit and WinForms integration tests (Program.cs)
+├── tests/                                   # Python pybis wrapper tests (test_openbis_fetch.py)
+└── docs/superpowers/                        # Design specifications and implementation plans
 ```
 
-Runtime configuration files are stored in a git-ignored `config/` directory next to the executable (`AppDomain.CurrentDomain.BaseDirectory\config\`) and are created automatically by the setup wizard on first launch (any legacy root-level JSON files in the application directory are ignored):
+### Runtime Configuration (`config/*.json`)
+
+Runtime configuration files are stored in a git-ignored `config/` directory next to the executable (`AppDomain.CurrentDomain.BaseDirectory\config\`) and are created automatically by the setup wizard on first launch (any legacy root-level JSON files in the application directory are ignored). **`config/*.json` files are never tracked in Git and are never emitted by source builds or `MSBuild /t:Publish`.**
 
 - `config/openbis_config.json` — openBIS instance URL and personal access token:
   ```json
   {
-    "openbisUrl": "https://openbis.your-institution.ch",
+    "openbisUrl": "https://your-openbis-instance.org",
     "token": "YOUR_OPENBIS_PERSONAL_ACCESS_TOKEN"
   }
   ```
@@ -104,23 +125,32 @@ Runtime configuration files are stored in a git-ignored `config/` directory next
 
 ---
 
-## Building & Testing
+## Building, Testing & Publishing
 
 > **Note:** Use `MSBuild.exe` rather than `dotnet build`, because `dotnet build` fails on the Brother b-PAC COM reference (`MSB4803`). Always pass `/t:Restore,Build` after cleaning `obj/`.
 
 ### Build (Debug & Release)
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OpenBISLabelStudio.slnx /t:Restore,Build /p:Configuration=Debug /nologo
-& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OpenBISLabelStudio.slnx /t:Restore,Build /p:Configuration=Release /nologo
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OpenBISLabelStudio.slnx /t:Restore,Build /p:Configuration=Debug /v:minimal
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OpenBISLabelStudio.slnx /t:Restore,Build /p:Configuration=Release /v:minimal
 ```
 
 ### Run Tests
 
 ```powershell
-# C# unit & WinForms integration tests
-& "OpenBISLabelStudio.Tests\bin\Debug\net10.0-windows\OpenBISLabelStudio.Tests.exe"
+# C# unit & WinForms integration tests (Debug & Release)
+& ".\OpenBISLabelStudio.Tests\bin\Debug\net10.0-windows\OpenBISLabelStudio.Tests.exe"
+& ".\OpenBISLabelStudio.Tests\bin\Release\net10.0-windows\OpenBISLabelStudio.Tests.exe"
 
-# Python openbis_fetch.py unit tests
-python -m pytest tests/test_openbis_fetch.py -v
+# Python openbis_fetch.py unit & worker tests
+pytest tests/test_openbis_fetch.py -v
 ```
+
+### Publish (Release)
+
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" OpenBISLabelStudio\OpenBISLabelStudio.csproj /t:Publish /p:Configuration=Release /p:PublishDir="C:\path\to\deploy-folder\" /v:minimal
+```
+
+The published folder contains the runtime deliverables — `OpenBISLabelStudio.exe`, `OpenBISLabelStudio.Backend.dll`, `Newtonsoft.Json.dll`, `openbis_fetch.py`, and `templates\*.lbx` (plus `.NET` host/runtime files such as `OpenBISLabelStudio.dll`, `OpenBISLabelStudio.deps.json`, `OpenBISLabelStudio.runtimeconfig.json`) — and **no** `config\` directory or secret JSON files.
