@@ -148,6 +148,55 @@ namespace OpenBISLabelStudio.Services
         }
 
         /// <summary>
+        /// Renders a preview PNG byte array asynchronously without blocking the calling thread.
+        /// Reads worker-generated PNG bytes directly when available and disposes temporary GDI+ bitmaps
+        /// on fallback or in-process STA renders.
+        /// </summary>
+        public async Task<byte[]> RenderTemplatePreviewPngAsync(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText = "",
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(details);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string templatePath = _configService.GetTemplateFilePath(slot, profile);
+            if (!File.Exists(templatePath))
+            {
+                return CreateFallbackPreviewPng(
+                    slot,
+                    profile,
+                    $"Template missing:\n{Path.GetFileName(templatePath)}");
+            }
+
+            if (_installedPrintersProvider == null)
+            {
+                string? workerExe = ResolvePreviewWorkerExecutablePath();
+                if (!string.IsNullOrEmpty(workerExe))
+                {
+                    var workerResult = await RenderViaWorkerProcessPngCoreAsync(
+                        workerExe,
+                        slot,
+                        profile,
+                        details,
+                        freeText,
+                        cancellationToken).ConfigureAwait(false);
+                    return workerResult.PngBytes;
+                }
+            }
+
+            using Image rendered = await RenderTemplatePreviewAsync(
+                slot,
+                profile,
+                details,
+                freeText,
+                cancellationToken).ConfigureAwait(false);
+            return EncodeImageAsPngBytes(rendered);
+        }
+
+        /// <summary>
         /// Pre-warms the background --preview-worker process and b-PAC COM component asynchronously
         /// so opening Page 2 previews or clicking Load Templates does not hit cold COM startup.
         /// </summary>
@@ -457,6 +506,77 @@ namespace OpenBISLabelStudio.Services
             return await RenderTemplatePreviewAsync(slot, profile, example, exampleFreeText, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Renders a Settings/Wizard Page 2 example preview directly as PNG bytes, serving cached
+        /// disk PNG bytes or worker output bytes without extra bitmap re-encoding.
+        /// </summary>
+        public async Task<byte[]> RenderExampleSlotPreviewPngAsync(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string templatePath = _configService.GetTemplateFilePath(slot, profile);
+            if (!File.Exists(templatePath))
+            {
+                return CreateFallbackPreviewPng(
+                    slot,
+                    profile,
+                    $"Template missing:\n{Path.GetFileName(templatePath)}");
+            }
+
+            string? cachePath = _installedPrintersProvider == null
+                ? TryBuildExamplePreviewCachePath(templatePath, slot, profile)
+                : null;
+
+            if (!string.IsNullOrEmpty(cachePath) && File.Exists(cachePath))
+            {
+                try
+                {
+                    byte[] cachedBytes = await File.ReadAllBytesAsync(cachePath, cancellationToken).ConfigureAwait(false);
+                    if (HasValidPngHeader(cachedBytes))
+                    {
+                        return cachedBytes;
+                    }
+
+                    TryDeleteTempFile(cachePath);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch
+                {
+                    TryDeleteTempFile(cachePath);
+                }
+            }
+
+            SampleDetailsDto example = BuildExampleSampleDetails(profile);
+            string exampleFreeText = profile == LabelTemplateProfile.Generic ? "Batch #4 / Substrate" : "";
+
+            string? workerExe = _installedPrintersProvider == null ? ResolvePreviewWorkerExecutablePath() : null;
+            if (!string.IsNullOrEmpty(workerExe))
+            {
+                var renderedResult = await RenderViaWorkerProcessPngCoreAsync(
+                    workerExe,
+                    slot,
+                    profile,
+                    example,
+                    exampleFreeText,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (renderedResult.IsTemplateRender && !string.IsNullOrEmpty(cachePath))
+                {
+                    TrySavePngBytesToCache(renderedResult.PngBytes, cachePath);
+                }
+
+                return renderedResult.PngBytes;
+            }
+
+            return await RenderTemplatePreviewPngAsync(slot, profile, example, exampleFreeText, cancellationToken).ConfigureAwait(false);
+        }
+
         private async Task<Image> RenderViaWorkerProcessAsync(
             string workerExePath,
             LabelTemplateType slot,
@@ -476,6 +596,27 @@ namespace OpenBISLabelStudio.Services
         }
 
         private async Task<(Image Image, bool IsTemplateRender)> RenderViaWorkerProcessCoreAsync(
+            string workerExePath,
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText,
+            CancellationToken cancellationToken)
+        {
+            var pngResult = await RenderViaWorkerProcessPngCoreAsync(
+                workerExePath,
+                slot,
+                profile,
+                details,
+                freeText,
+                cancellationToken).ConfigureAwait(false);
+
+            using var ms = new MemoryStream(pngResult.PngBytes, writable: false);
+            using Image loaded = Image.FromStream(ms);
+            return (new Bitmap(loaded), pngResult.IsTemplateRender);
+        }
+
+        private async Task<(byte[] PngBytes, bool IsTemplateRender)> RenderViaWorkerProcessPngCoreAsync(
             string workerExePath,
             LabelTemplateType slot,
             LabelTemplateProfile profile,
@@ -504,12 +645,16 @@ namespace OpenBISLabelStudio.Services
                     string reason = string.IsNullOrWhiteSpace(response.Error)
                         ? "Preview worker did not produce an image."
                         : response.Error;
-                    return (CreateFallbackPreviewBitmap(slot, profile, reason), false);
+                    return (CreateFallbackPreviewPng(slot, profile, reason), false);
                 }
 
-                using var fs = new FileStream(outPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                using Image loaded = Image.FromStream(fs);
-                return (new Bitmap(loaded), response.IsTemplateRender);
+                byte[] pngBytes = await File.ReadAllBytesAsync(outPath, cancellationToken).ConfigureAwait(false);
+                if (!HasValidPngHeader(pngBytes))
+                {
+                    return (CreateFallbackPreviewPng(slot, profile, "Preview worker produced an invalid PNG image."), false);
+                }
+
+                return (pngBytes, response.IsTemplateRender);
             }
             catch (OperationCanceledException)
             {
@@ -517,7 +662,7 @@ namespace OpenBISLabelStudio.Services
             }
             catch (Exception ex)
             {
-                return (CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}"), false);
+                return (CreateFallbackPreviewPng(slot, profile, $"Preview unavailable: {ex.Message}"), false);
             }
             finally
             {
@@ -1192,6 +1337,65 @@ namespace OpenBISLabelStudio.Services
         }
 
         /// <summary>
+        /// Renders a descriptive fallback PNG byte array when preview export fails.
+        /// </summary>
+        public static byte[] CreateFallbackPreviewPng(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            string reason)
+        {
+            using Bitmap bitmap = CreateFallbackPreviewBitmap(slot, profile, reason);
+            return EncodeImageAsPngBytes(bitmap);
+        }
+
+        /// <summary>
+        /// Renders a lightweight loading card PNG byte array while b-PAC renders off the UI thread.
+        /// </summary>
+        public static byte[] CreateLoadingPreviewPng(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile)
+        {
+            using Bitmap bitmap = CreateLoadingPreviewBitmap(slot, profile);
+            return EncodeImageAsPngBytes(bitmap);
+        }
+
+        /// <summary>
+        /// Encodes <paramref name="image"/> safely into a standalone PNG byte array.
+        /// </summary>
+        public static byte[] EncodeImageAsPngBytes(Image image)
+        {
+            ArgumentNullException.ThrowIfNull(image);
+
+            using var ms = new MemoryStream();
+            try
+            {
+                image.Save(ms, ImageFormat.Png);
+                return ms.ToArray();
+            }
+            catch (ExternalException)
+            {
+                ms.SetLength(0);
+                using var clone = new Bitmap(image);
+                clone.Save(ms, ImageFormat.Png);
+                return ms.ToArray();
+            }
+        }
+
+        private static bool HasValidPngHeader(byte[] bytes)
+        {
+            return bytes != null
+                   && bytes.Length > 24
+                   && bytes[0] == 0x89
+                   && bytes[1] == 0x50
+                   && bytes[2] == 0x4E
+                   && bytes[3] == 0x47
+                   && bytes[4] == 0x0D
+                   && bytes[5] == 0x0A
+                   && bytes[6] == 0x1A
+                   && bytes[7] == 0x0A;
+        }
+
+        /// <summary>
         /// Reads the designed label canvas dimensions (in pixels at 360 DPI) from an .lbx template archive.
         /// </summary>
         public static bool TryReadLbxPaperSizePx(string lbxPath, out int widthPx, out int heightPx)
@@ -1259,6 +1463,23 @@ namespace OpenBISLabelStudio.Services
 
         private static void TrySaveBitmapToCache(Image image, string cachePath)
         {
+            try
+            {
+                TrySavePngBytesToCache(EncodeImageAsPngBytes(image), cachePath);
+            }
+            catch
+            {
+                // Ignore best-effort example preview cache write failures.
+            }
+        }
+
+        private static void TrySavePngBytesToCache(byte[] pngBytes, string cachePath)
+        {
+            if (pngBytes == null || pngBytes.Length == 0)
+            {
+                return;
+            }
+
             string tempPath = "";
             try
             {
@@ -1269,7 +1490,7 @@ namespace OpenBISLabelStudio.Services
                 }
 
                 tempPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                image.Save(tempPath, ImageFormat.Png);
+                File.WriteAllBytes(tempPath, pngBytes);
                 File.Move(tempPath, cachePath, overwrite: true);
             }
             catch

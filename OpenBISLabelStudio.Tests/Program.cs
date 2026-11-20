@@ -3,10 +3,14 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace OpenBISLabelStudio.Tests
 {
+    using OpenBISLabelStudio.Backend.Contracts;
+    using OpenBISLabelStudio.Backend.Services;
     using OpenBISLabelStudio.Models;
     using OpenBISLabelStudio.Services;
     using ModelTypes = OpenBISLabelStudio.Models;
@@ -46,7 +50,11 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(Form1HasSettingsButtonWithoutOverlaps), Form1HasSettingsButtonWithoutOverlaps),
                 (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges),
                 (nameof(TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion), TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion),
-                (nameof(BackendAssemblyHasNoUiControlDependencies), BackendAssemblyHasNoUiControlDependencies)
+                (nameof(BackendAssemblyHasNoUiControlDependencies), BackendAssemblyHasNoUiControlDependencies),
+                (nameof(BackendExpiresTokenRecoveryCoalescesAndRetriesWithoutUiForms), BackendExpiresTokenRecoveryCoalescesAndRetriesWithoutUiForms),
+                (nameof(BackendLoadSamplePreviewsAndFreeTextIsolationPreventsStaleState), BackendLoadSamplePreviewsAndFreeTextIsolationPreventsStaleState),
+                (nameof(BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory), BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory),
+                (nameof(BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges), BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges)
             };
 
             int failures = 0;
@@ -1689,6 +1697,517 @@ namespace OpenBISLabelStudio.Tests
                     }
                 }
             }
+        }
+
+        private sealed class DelegateTokenRecoveryPrompter : ITokenRecoveryPrompter
+        {
+            private readonly Func<string, string, CancellationToken, Task<bool>> _handler;
+
+            public DelegateTokenRecoveryPrompter(Func<string, string, CancellationToken, Task<bool>> handler)
+            {
+                _handler = handler;
+            }
+
+            public Task<bool> PromptForNewTokenAsync(string currentUrl, string warningMessage, CancellationToken ct = default)
+            {
+                return _handler(currentUrl, warningMessage, ct);
+            }
+        }
+
+        private static void BackendExpiresTokenRecoveryCoalescesAndRetriesWithoutUiForms()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "old-tok"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+                configService.SavePrinterConfig(AppConfigService.CreateDefaultPrinterConfig());
+
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        tok = req.get('token', '')\n" +
+                    "        action = req.get('action', '')\n" +
+                    "        if tok != 'new-tok':\n" +
+                    "            resp = {'success': False, 'errorType': 'token_expired', 'error': 'Token invalid'}\n" +
+                    "        elif action == 'list':\n" +
+                    "            resp = {'success': True, 'data': [{'permId': 'P-1', 'name': 'Obj-1', 'modificationDate': '2026-11-20'}]}\n" +
+                    "        elif action == 'types':\n" +
+                    "            resp = {'success': True, 'types': [{'code': 'CRYSTAL', 'description': 'Crystal'}]}\n" +
+                    "        else:\n" +
+                    "            resp = {'success': True, 'sessionActive': True}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                using var backend = new LabelStudioBackend(
+                    tempRoot,
+                    installedPrintersProvider: () => new[] { "Brother PT-P700" });
+
+                int promptCount = 0;
+                var promptEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var promptRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var coalescingPrompter = new DelegateTokenRecoveryPrompter(async (url, warning, ct) =>
+                {
+                    Interlocked.Increment(ref promptCount);
+                    AssertEqual("https://openbis.example.org", url, "Recovery prompt URL mismatch");
+                    AssertTrue(warning.Contains("Token invalid", StringComparison.Ordinal), $"Expected error detail in warning: {warning}");
+                    promptEntered.TrySetResult(true);
+                    await promptRelease.Task.ConfigureAwait(false);
+                    configService.SaveAppConfig(new AppConfig
+                    {
+                        OpenBisUrl = url,
+                        Token = "new-tok"
+                    });
+                    return true;
+                });
+
+                Task<SampleListResultDto> firstLoad = backend.LoadObjectsForTypeAsync("CRYSTAL", coalescingPrompter);
+                AssertTrue(promptEntered.Task.Wait(TimeSpan.FromSeconds(5)), "Timed out waiting for first recovery prompt");
+
+                Task<SampleListResultDto> secondLoad = backend.LoadObjectsForTypeAsync("CRYSTAL", coalescingPrompter);
+                Thread.Sleep(100);
+                AssertEqual(1, Volatile.Read(ref promptCount), "Concurrent expired-token calls must coalesce to a single recovery prompt");
+
+                promptRelease.SetResult(true);
+                SampleListResultDto[] results = Task.WhenAll(firstLoad, secondLoad).GetAwaiter().GetResult();
+
+                AssertEqual(1, Volatile.Read(ref promptCount), "Prompt must only run once for coalesced concurrent calls");
+                foreach (SampleListResultDto res in results)
+                {
+                    AssertTrue(res.Success, $"Expected coalesced recovery retry to succeed, error: {res.ErrorMessage}");
+                    AssertFalse(res.WasCancelled, "Successful recovery must not mark WasCancelled");
+                    AssertEqual(1, res.Samples.Count, "Expected 1 sample after recovery retry");
+                    AssertEqual("P-1", res.Samples[0].PermId, "Recovered sample PermId mismatch");
+                    AssertEqual("Obj-1", res.Samples[0].Name, "Recovered sample Name mismatch");
+                }
+
+                // Reset token to stale value and verify canceled prompter returns WasCancelled + NoticeMessage cleanly.
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "old-tok"
+                });
+
+                int cancelPromptCount = 0;
+                var cancelPrompter = new DelegateTokenRecoveryPrompter((_, _, _) =>
+                {
+                    cancelPromptCount++;
+                    return Task.FromResult(false);
+                });
+
+                SampleListResultDto cancelledResult = backend.LoadObjectsForTypeAsync("CRYSTAL", cancelPrompter).GetAwaiter().GetResult();
+                AssertFalse(cancelledResult.Success, "Canceled token recovery must return Success == false");
+                AssertTrue(cancelledResult.WasCancelled, "Canceled token recovery must set WasCancelled == true");
+                AssertTrue(!string.IsNullOrWhiteSpace(cancelledResult.NoticeMessage), "Canceled token recovery must provide non-empty NoticeMessage");
+                AssertEqual(1, cancelPromptCount, "Canceled recovery should prompt once");
+
+                // Verify faulted prompter does not wedge subsequent recovery attempts.
+                int faultCount = 0;
+                var faultPrompter = new DelegateTokenRecoveryPrompter((_, _, _) =>
+                {
+                    faultCount++;
+                    return Task.FromException<bool>(new InvalidOperationException("Prompter boom"));
+                });
+
+                SampleListResultDto faultedResult = backend.LoadObjectsForTypeAsync("CRYSTAL", faultPrompter).GetAwaiter().GetResult();
+                AssertFalse(faultedResult.Success, "Faulted prompter must return Success == false cleanly");
+                AssertEqual(1, faultCount, "Faulted prompter should be invoked once");
+                AssertTrue(faultedResult.ErrorMessage.Contains("Prompter boom", StringComparison.Ordinal),
+                    $"Expected fault message to propagate cleanly, actual: {faultedResult.ErrorMessage}");
+
+                // Verify RefreshWorkspaceTypesAsync recovers via prompter and updates type display name on disk.
+                int refreshPromptCount = 0;
+                var refreshPrompter = new DelegateTokenRecoveryPrompter((url, _, _) =>
+                {
+                    refreshPromptCount++;
+                    configService.SaveAppConfig(new AppConfig { OpenBisUrl = url, Token = "new-tok" });
+                    return Task.FromResult(true);
+                });
+
+                BackgroundTypeRefreshResult refreshRes = backend.RefreshWorkspaceTypesAsync(refreshPrompter).GetAwaiter().GetResult();
+                AssertTrue(refreshRes.Success, $"RefreshWorkspaceTypesAsync should succeed after recovery, error: {refreshRes.ErrorMessage}");
+                AssertEqual(1, refreshPromptCount, "RefreshWorkspaceTypesAsync should prompt once when token expired");
+                AssertEqual("Crystal", refreshRes.ConfiguredTypes[0].DisplayText, "RefreshWorkspaceTypesAsync should update DisplayText");
+            });
+        }
+
+        private static void BackendLoadSamplePreviewsAndFreeTextIsolationPreventsStaleState()
+        {
+            static void AssertValidPngBytes(byte[] bytes, string context)
+            {
+                AssertTrue(bytes != null && bytes.Length > 8, $"{context}: PNG byte array must be non-empty");
+                AssertEqual((byte)0x89, bytes![0], $"{context}: PNG byte[0] signature mismatch");
+                AssertEqual((byte)0x50, bytes[1], $"{context}: PNG byte[1] signature mismatch");
+                AssertEqual((byte)0x4E, bytes[2], $"{context}: PNG byte[2] signature mismatch");
+                AssertEqual((byte)0x47, bytes[3], $"{context}: PNG byte[3] signature mismatch");
+            }
+
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "valid-tok"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTRATE", DisplayName = "Silicon Substrate", TemplateProfile = LabelTemplateProfile.Generic },
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule }
+                });
+                configService.SavePrinterConfig(new PrinterConfig
+                {
+                    SmallBoxPrinter = "Brother PT-P700",
+                    MagnetPrinter = "Brother PT-P700 (Kopie 1)",
+                    FlaskPrinter = "Brother PT-P700 (Kopie 2)"
+                });
+
+                string detailsLog = Path.Combine(tempRoot, "details_requests.log");
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    $"log_path = r'''{detailsLog}'''\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        action = req.get('action', '')\n" +
+                    "        if action == 'list':\n" +
+                    "            resp = {'success': True, 'data': [{'permId': 'PERM-1', 'name': 'Sub-1', 'modificationDate': '2026-11-20'}]}\n" +
+                    "        elif action == 'details':\n" +
+                    "            with open(log_path, 'a', encoding='utf-8') as f:\n" +
+                    "                f.write(json.dumps({'permId': req.get('permId'), 'skipEln': req.get('skipEln', False)}) + '\\n')\n" +
+                    "            resp = {'success': True, 'details': {'permId': req.get('permId', ''), 'sampleType': 'SUBSTRATE', 'name': 'Sub-1'}}\n" +
+                    "        else:\n" +
+                    "            resp = {'success': True, 'sessionActive': True}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                using var backend = new LabelStudioBackend(
+                    tempRoot,
+                    installedPrintersProvider: () => new[] { "Brother PT-P700" });
+
+                // 1. Before any sample is loaded: FreeText render returns empty byte[], Print returns exact error message.
+                byte[] preLoadFreeText = backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "custom").GetAwaiter().GetResult();
+                AssertEqual(0, preLoadFreeText.Length, "RenderSlotWithFreeTextAsync before sample load must return empty byte[]");
+
+                LabelPrintBatchResult preLoadPrint = backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection { Slot = LabelTemplateType.SmallBox12mm, PrinterName = "Brother PT-P700" }
+                }).GetAwaiter().GetResult();
+                AssertFalse(preLoadPrint.AllSucceeded, "PrintSelectedLabelsAsync before sample load must fail");
+                AssertEqual("No active sample loaded. Click 'Load Templates' first.", preLoadPrint.Error,
+                    "Expected exact no-active-sample print error message");
+
+                // 2. Loading sample previews sets active sample, skips ELN for Generic, and streams 3 valid PNGs.
+                var streamedSlots = new List<(LabelTemplateType Slot, byte[] Bytes)>();
+                SamplePreviewBundleDto bundle = backend.LoadSamplePreviewsAsync(
+                    "SUBSTRATE",
+                    "PERM-1",
+                    "M1",
+                    "F1",
+                    onSlotReady: (slot, png) => streamedSlots.Add((slot, png))).GetAwaiter().GetResult();
+
+                AssertTrue(bundle.Success, $"LoadSamplePreviewsAsync should succeed, error: {bundle.ErrorMessage}");
+                AssertTrue(bundle.IsGenericProfile, "SUBSTRATE must resolve to IsGenericProfile == true");
+                AssertEqual(3, streamedSlots.Count, "onSlotReady must be invoked once per template slot");
+                AssertEqual(3, bundle.SlotPreviews.Count, "SlotPreviews must contain all 3 slots");
+                foreach (var (slot, png) in streamedSlots)
+                {
+                    AssertValidPngBytes(png, $"Streamed slot {slot}");
+                }
+
+                AssertTrue(File.Exists(detailsLog), "Expected details request log from stub Python script");
+                string loggedDetails = File.ReadAllText(detailsLog);
+                AssertTrue(loggedDetails.Contains("\"skipEln\": true", StringComparison.OrdinalIgnoreCase),
+                    $"Expected Generic profile details call to pass skipEln=true, actual: {loggedDetails}");
+
+                // 3. Subsequent FreeText re-render produces valid PNG bytes while active sample is loaded.
+                byte[] updatedMagnet = backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "M2").GetAwaiter().GetResult();
+                AssertValidPngBytes(updatedMagnet, "FreeText Magnet re-render");
+
+                // 4. ClearActiveSample clears state cleanly.
+                backend.ClearActiveSample();
+                byte[] afterClear = backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "M3").GetAwaiter().GetResult();
+                AssertEqual(0, afterClear.Length, "RenderSlotWithFreeTextAsync after ClearActiveSample must return empty byte[]");
+
+                // 5. Loading a sample then switching object type (LoadObjectsForTypeAsync) clears active sample.
+                SamplePreviewBundleDto reloaded = backend.LoadSamplePreviewsAsync("SUBSTRATE", "PERM-1", "M1", "F1").GetAwaiter().GetResult();
+                AssertTrue(reloaded.Success, "Second LoadSamplePreviewsAsync should succeed");
+                SampleListResultDto switched = backend.LoadObjectsForTypeAsync("SUBSTANCE").GetAwaiter().GetResult();
+                AssertTrue(switched.Success, "LoadObjectsForTypeAsync should succeed");
+                byte[] afterSwitch = backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "M4").GetAwaiter().GetResult();
+                AssertEqual(0, afterSwitch.Length, "LoadObjectsForTypeAsync must clear active sample to prevent stale FreeText renders");
+
+                // 6. Loading & fallback PNG helpers + example previews + empty-selection print + printer updates.
+                AssertValidPngBytes(backend.GetLoadingPreviewPng(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Molecule), "GetLoadingPreviewPng");
+                AssertValidPngBytes(backend.GetFallbackPreviewPng(LabelTemplateType.Flask24mm, LabelTemplateProfile.Generic, "Missing"), "GetFallbackPreviewPng");
+                Dictionary<LabelTemplateType, byte[]> examples = backend.GetExamplePreviewsAsync(LabelTemplateProfile.Molecule).GetAwaiter().GetResult();
+                AssertEqual(3, examples.Count, "GetExamplePreviewsAsync must return 3 slots");
+                foreach (var kvp in examples)
+                {
+                    AssertValidPngBytes(kvp.Value, $"Example {kvp.Key}");
+                }
+
+                // Reload active sample, then check empty print selections error and UpdatePrinterSelectionsAsync persistence.
+                SamplePreviewBundleDto activeAgain = backend.LoadSamplePreviewsAsync("SUBSTRATE", "PERM-1", "M1", "F1").GetAwaiter().GetResult();
+                AssertTrue(activeAgain.Success, "Reloading sample for print selection validation should succeed");
+
+                LabelPrintBatchResult emptyPrint = backend.PrintSelectedLabelsAsync(Array.Empty<PrintSlotSelection>()).GetAwaiter().GetResult();
+                AssertFalse(emptyPrint.AllSucceeded, "Empty print selections must fail");
+                AssertEqual("No label templates selected for printing.", emptyPrint.Error, "Empty selections print error mismatch");
+
+                OperationResult printerSave = backend.UpdatePrinterSelectionsAsync(
+                    "Brother PT-P700 (Box)",
+                    "Brother PT-P700 (Mag)",
+                    "Brother PT-P700 (Flask)").GetAwaiter().GetResult();
+                AssertTrue(printerSave.Success, $"UpdatePrinterSelectionsAsync should succeed, error: {printerSave.ErrorMessage}");
+                PrinterConfig? updatedPrinters = configService.LoadPrinterConfig();
+                AssertNotNull(updatedPrinters, "Updated printer config should exist");
+                AssertEqual("Brother PT-P700 (Box)", updatedPrinters!.SmallBoxPrinter, "Updated SmallBoxPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Mag)", updatedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Flask)", updatedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
+
+                // Direct LabelPreviewRenderer PNG helper coverage.
+                var renderer = new LabelPreviewRenderer(configService, () => Array.Empty<string>());
+                SampleDetailsDto exampleDetails = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule);
+                byte[] directTemplatePng = renderer.RenderTemplatePreviewPngAsync(
+                    LabelTemplateType.SmallBox12mm,
+                    LabelTemplateProfile.Molecule,
+                    exampleDetails).GetAwaiter().GetResult();
+                AssertValidPngBytes(directTemplatePng, "Direct RenderTemplatePreviewPngAsync");
+                byte[] directExamplePng = renderer.RenderExampleSlotPreviewPngAsync(
+                    LabelTemplateType.Magnet12mm,
+                    LabelTemplateProfile.Generic).GetAwaiter().GetResult();
+                AssertValidPngBytes(directExamplePng, "Direct RenderExampleSlotPreviewPngAsync");
+                using var testBmp = new Bitmap(4, 4);
+                AssertValidPngBytes(LabelPreviewRenderer.EncodeImageAsPngBytes(testBmp), "EncodeImageAsPngBytes");
+            });
+        }
+
+        private static void BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory()
+        {
+            WithTempDir(tempRoot =>
+            {
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        action = req.get('action', '')\n" +
+                    "        if req.get('token') != 'good-tok':\n" +
+                    "            resp = {'success': False, 'errorType': 'token_expired', 'error': 'Token rejected'}\n" +
+                    "        elif action == 'types':\n" +
+                    "            resp = {'success': True, 'types': [{'code': 'SUBSTANCE', 'description': 'Substance'}, {'code': 'CRYSTAL', 'description': 'Lab Crystal'}, {'code': 'WAFER', 'description': 'Wafer'}]}\n" +
+                    "        else:\n" +
+                    "            resp = {'success': True, 'sessionActive': True}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                using var backend = new LabelStudioBackend(
+                    tempRoot,
+                    installedPrintersProvider: () => new[] { "Brother PT-P700", "Microsoft Print to PDF" });
+
+                WorkspaceStartupState initial = backend.InitializeWorkspaceAsync().GetAwaiter().GetResult();
+                AssertEqual(SetupWizardStep.Connection, initial.MissingWizardStep, "Fresh tempRoot must require Connection step");
+                AssertFalse(initial.HasValidConnection, "Fresh tempRoot must not have valid connection");
+
+                // Offline save validations
+                OperationResult badUrlSave = backend.SaveSettingsOfflineAsync(new SettingsSaveRequest
+                {
+                    OpenBisUrl = "ftp://invalid",
+                    Token = "good-tok",
+                    ObjectTypes = new[] { new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE" } }
+                }).GetAwaiter().GetResult();
+                AssertFalse(badUrlSave.Success, "Invalid URL must fail offline save");
+                AssertEqual("Enter a valid openBIS Instance URL starting with http:// or https://.", badUrlSave.ErrorMessage, "URL validation message mismatch");
+
+                OperationResult emptyTokenSave = backend.SaveSettingsOfflineAsync(new SettingsSaveRequest
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "  ",
+                    ObjectTypes = new[] { new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE" } }
+                }).GetAwaiter().GetResult();
+                AssertFalse(emptyTokenSave.Success, "Empty token must fail offline save");
+                AssertEqual("Enter an openBIS Personal Access Token.", emptyTokenSave.ErrorMessage, "Token validation message mismatch");
+
+                OperationResult noTypesSave = backend.SaveSettingsOfflineAsync(new SettingsSaveRequest
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "good-tok",
+                    ObjectTypes = new[] { new ObjectTypeRowDto { IsSelected = false, Code = "SUBSTANCE" } }
+                }).GetAwaiter().GetResult();
+                AssertFalse(noTypesSave.Success, "Zero selected object types must fail offline save");
+                AssertEqual("Select at least one object type.", noTypesSave.ErrorMessage, "Object types validation message mismatch");
+
+                // Wizard step validations
+                OperationResult wizardBadUrl = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.Connection,
+                    OpenBisUrl = "not-a-url",
+                    Token = "good-tok"
+                }).GetAwaiter().GetResult();
+                AssertFalse(wizardBadUrl.Success, "Wizard Connection step must validate URL");
+                AssertEqual("Enter a valid openBIS Instance URL starting with http:// or https://.", wizardBadUrl.ErrorMessage, "Wizard URL validation mismatch");
+
+                OperationResult wizardNoTypes = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.ObjectTypes,
+                    ObjectTypes = Array.Empty<ObjectTypeRowDto>()
+                }).GetAwaiter().GetResult();
+                AssertFalse(wizardNoTypes.Success, "Wizard ObjectTypes step must require at least one selected type");
+                AssertEqual("Select at least one object type.", wizardNoTypes.ErrorMessage, "Wizard types validation mismatch");
+
+                // TestConnectionAsync auth focus + persistence isolation
+                ConnectionCheckResult authFail = backend.TestConnectionAsync("https://openbis.example.org", "bad-tok", persistOnSuccess: true).GetAwaiter().GetResult();
+                AssertFalse(authFail.Success, "Auth failure must return Success == false");
+                AssertTrue(authFail.ShouldFocusToken, "Auth failure must set ShouldFocusToken == true");
+                AssertFalse(File.Exists(Path.Combine(tempRoot, "config", "openbis_config.json")), "Failed connection test must not persist config");
+
+                ConnectionCheckResult noPersistOk = backend.TestConnectionAsync("https://openbis.example.org", "good-tok", persistOnSuccess: false).GetAwaiter().GetResult();
+                AssertTrue(noPersistOk.Success, $"Valid connection check should succeed, message: {noPersistOk.Message}");
+                AssertFalse(noPersistOk.Persisted, "persistOnSuccess=false must not persist config");
+                AssertFalse(File.Exists(Path.Combine(tempRoot, "config", "openbis_config.json")), "persistOnSuccess=false must not create openbis_config.json");
+
+                ConnectionCheckResult persistOk = backend.TestConnectionAsync("https://openbis.example.org", "good-tok", persistOnSuccess: true).GetAwaiter().GetResult();
+                AssertTrue(persistOk.Success && persistOk.Persisted, "persistOnSuccess=true must persist config");
+                AssertTrue(File.Exists(Path.Combine(tempRoot, "config", "openbis_config.json")), "openbis_config.json must be written under tempRoot/config/");
+
+                // Full offline save under tempRoot only
+                OperationResult savedAll = backend.SaveSettingsOfflineAsync(new SettingsSaveRequest
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "good-tok",
+                    ObjectTypes = new[]
+                    {
+                        new ObjectTypeRowDto
+                        {
+                            IsSelected = true,
+                            Code = "CRYSTAL",
+                            DisplayName = "Crystal",
+                            TemplateProfile = LabelTemplateProfile.Molecule
+                        }
+                    },
+                    SmallBoxPrinter = "Brother PT-P700",
+                    MagnetPrinter = "Brother PT-P700",
+                    FlaskPrinter = "Brother PT-P700"
+                }).GetAwaiter().GetResult();
+                AssertTrue(savedAll.Success, $"Offline save should succeed, error: {savedAll.ErrorMessage}");
+                AssertTrue(File.Exists(Path.Combine(tempRoot, "config", "openbis_types.json")), "openbis_types.json must exist under tempRoot/config/");
+                AssertTrue(File.Exists(Path.Combine(tempRoot, "config", "printers_config.json")), "printers_config.json must exist under tempRoot/config/");
+
+                WorkspaceStartupState ready = backend.InitializeWorkspaceAsync().GetAwaiter().GetResult();
+                AssertEqual(SetupWizardStep.None, ready.MissingWizardStep, "Completed config under tempRoot must return SetupWizardStep.None");
+                AssertEqual(1, ready.ConfiguredTypes.Count, "Expected 1 configured type");
+                AssertEqual("CRYSTAL", ready.ConfiguredTypes[0].Code, "Configured type code mismatch");
+                AssertTrue(ready.ConfiguredTypes[0].IsMoleculeProfile, "Expected Molecule profile on CRYSTAL");
+                AssertEqual(1, ready.Printers.AvailablePrinters.Count, "Non-Brother printers must be filtered out of PrinterDropdownState");
+                AssertTrue(ready.Printers.HasInstalledBrotherPrinters, "Installed Brother printer should set HasInstalledBrotherPrinters");
+
+                // Verify GetSettingsSnapshotAsync & FetchAndMergeServerTypesAsync
+                SettingsSnapshotDto snapshot = backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+                AssertEqual("https://openbis.example.org", snapshot.OpenBisUrl, "Snapshot URL mismatch");
+                AssertEqual("good-tok", snapshot.Token, "Snapshot Token mismatch");
+                AssertTrue(snapshot.HasValidOpenBisConfig && snapshot.HasValidConfiguredTypes && snapshot.HasPrinterConfig,
+                    "Snapshot readiness flags must all be true");
+
+                ServerTypeSyncResult expiredSync = backend.FetchAndMergeServerTypesAsync(
+                    "https://openbis.example.org",
+                    "bad-tok",
+                    snapshot.ConfiguredTypes).GetAwaiter().GetResult();
+                AssertFalse(expiredSync.Success, "Expired token sync must fail");
+                AssertTrue(expiredSync.IsTokenExpired, "Expired token sync must set IsTokenExpired == true");
+
+                ServerTypeSyncResult mergedSync = backend.FetchAndMergeServerTypesAsync(
+                    "https://openbis.example.org",
+                    "good-tok",
+                    snapshot.ConfiguredTypes).GetAwaiter().GetResult();
+                AssertTrue(mergedSync.Success, $"FetchAndMergeServerTypesAsync should succeed, error: {mergedSync.StatusMessage}");
+                AssertEqual(3, mergedSync.MergedRows.Count, "Expected 3 merged server types");
+                AssertFalse(mergedSync.MergedRows[0].IsSelected, "Unconfigured SUBSTANCE should stay unchecked");
+                AssertEqual(LabelTemplateProfile.Molecule, mergedSync.MergedRows[0].TemplateProfile, "SUBSTANCE should default to Molecule");
+                AssertTrue(mergedSync.MergedRows[1].IsSelected, "Existing CRYSTAL should preserve checked state");
+                AssertEqual(LabelTemplateProfile.Molecule, mergedSync.MergedRows[1].TemplateProfile, "CRYSTAL should preserve Molecule profile");
+                AssertEqual("Lab Crystal", mergedSync.MergedRows[1].DisplayName, "CRYSTAL DisplayName should update from server description");
+                AssertFalse(mergedSync.MergedRows[2].IsSelected, "New WAFER should start unchecked");
+            });
+        }
+
+        private static void BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges()
+        {
+            var serverTypes = new[]
+            {
+                new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
+                new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" },
+                new OpenBisTypeInfoDto { Code = "CUSTOM_PLATE", Description = "" }
+            };
+
+            List<ConfiguredOpenBisType> defaults = LabelStudioBackend.BuildInitialTypeRows(
+                serverTypes,
+                Array.Empty<ConfiguredOpenBisType>());
+            AssertEqual(3, defaults.Count, "Expected 3 default rows");
+            AssertEqual(LabelTemplateProfile.Molecule, defaults[0].TemplateProfile, "SUBSTANCE must default to Molecule");
+            AssertEqual(LabelTemplateProfile.Generic, defaults[1].TemplateProfile, "CRYSTAL must default to Generic");
+            AssertEqual("Custom Plate", defaults[2].DisplayName, "Empty description must fall back to formatted friendly name");
+
+            var saved = new[]
+            {
+                new ConfiguredOpenBisType
+                {
+                    Code = "CRYSTAL",
+                    DisplayName = "Crystal",
+                    TemplateProfile = LabelTemplateProfile.Molecule
+                }
+            };
+            List<ConfiguredOpenBisType> merged = LabelStudioBackend.BuildInitialTypeRows(serverTypes, saved);
+            AssertEqual(LabelTemplateProfile.Molecule, merged[1].TemplateProfile, "Saved profile must override default");
+
+            AssertEqual(LabelTemplateProfile.Molecule,
+                LabelStudioBackend.ResolveTemplateProfile(" crystal ", saved, null),
+                "ResolveTemplateProfile must match configured type case-insensitively");
+            AssertEqual(LabelTemplateProfile.Molecule,
+                LabelStudioBackend.ResolveTemplateProfile("UNKNOWN", saved, "CRYSTAL"),
+                "ResolveTemplateProfile must fall back to sampleDetailsType");
+            AssertEqual(LabelTemplateProfile.Generic,
+                LabelStudioBackend.ResolveTemplateProfile("UNKNOWN", saved, "ALSO_UNKNOWN"),
+                "ResolveTemplateProfile must default unconfigured types to Generic");
+
+            AssertFalse(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", null),
+                "Null config must return false");
+            AssertFalse(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", new AppConfig { OpenBisUrl = "https://b", Token = "" }),
+                "Empty token must return false");
+            AssertFalse(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", new AppConfig { OpenBisUrl = "https://a", Token = "t1" }),
+                "Identical credentials must return false");
+            AssertTrue(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", new AppConfig { OpenBisUrl = "https://a", Token = "t2" }),
+                "Changed token must return true");
+            AssertTrue(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", new AppConfig { OpenBisUrl = "https://b", Token = "t1" }),
+                "Changed URL must return true");
         }
 
         private static void ShowOffscreen(Form form)
