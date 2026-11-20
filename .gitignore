@@ -3,6 +3,10 @@ config/
 **/config/
 openbis_config.json
 **/openbis_config.json
+openbis_types.json
+**/openbis_types.json
+printers_config.json
+**/printers_config.json
 
 # Temporary / Generated results
 openbis_results.json
