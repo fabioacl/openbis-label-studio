@@ -62,6 +62,7 @@ namespace OpenBISLabelStudio
         private string _fallbackSmallBoxPrinter = "Brother PT-P700";
         private string _fallbackMagnetPrinter = "Brother PT-P700 (Kopie 1)";
         private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
+        private Icon? _windowIcon;
 
         /// <summary>
         /// Initializes the unified setup and settings dialog for the specified <paramref name="mode"/>.
@@ -77,6 +78,7 @@ namespace OpenBISLabelStudio
             _initialWarning = initialWarning;
 
             InitializeComponent();
+            AppIconProvider.AttachWindowIcon(this, ref _windowIcon);
             InitializeFromConfig(startStep);
         }
 
@@ -216,6 +218,7 @@ namespace OpenBISLabelStudio
             AssignPreviewPictureBoxImage(picPreviewFlask, null);
 
             _previewPngCache.Clear();
+            AppIconProvider.DetachWindowIcon(this, ref _windowIcon);
         }
 
         partial void DisposeOwnedFonts()

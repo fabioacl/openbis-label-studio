@@ -44,6 +44,7 @@ namespace OpenBISLabelStudio
         private string? _loadingStatusMessage;
         private string _persistentNoticeMessage = "";
         private string? _persistentNoticeTooltip;
+        private Icon? _windowIcon;
 
         public Form1()
             : this(new OpenBISLabelStudio.Backend.Services.LabelStudioBackend(), ownsBackend: true)
@@ -62,6 +63,7 @@ namespace OpenBISLabelStudio
             _recoveryPrompter = new FormTokenRecoveryPrompter(this, _backend);
 
             InitializeComponent();
+            AppIconProvider.AttachWindowIcon(this, ref _windowIcon);
         }
 
         /// <summary>
@@ -133,6 +135,7 @@ namespace OpenBISLabelStudio
             SetPictureBoxImage(magnetLabelPreview, null);
             SetPictureBoxImage(flaskLabelPreview, null);
             _statusToolTip.Dispose();
+            AppIconProvider.DetachWindowIcon(this, ref _windowIcon);
 
             if (_ownsBackend)
             {
