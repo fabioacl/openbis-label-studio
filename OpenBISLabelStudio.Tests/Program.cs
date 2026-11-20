@@ -2084,7 +2084,21 @@ namespace OpenBISLabelStudio.Tests
                 AssertFalse(wizardNoTypes.Success, "Wizard ObjectTypes step must require at least one selected type");
                 AssertEqual("Select at least one object type.", wizardNoTypes.ErrorMessage, "Wizard types validation mismatch");
 
-                // TestConnectionAsync auth focus + persistence isolation
+                // TestConnectionAsync validation focus + auth focus + persistence isolation
+                ConnectionCheckResult badUrlEmptyToken = backend.TestConnectionAsync("ftp://invalid", "", persistOnSuccess: false).GetAwaiter().GetResult();
+                AssertFalse(badUrlEmptyToken.Success, "Invalid URL with empty token must return Success == false");
+                AssertFalse(badUrlEmptyToken.ShouldFocusToken, "Invalid URL with empty token must not focus token input");
+                AssertEqual("Enter a valid openBIS Instance URL starting with http:// or https://.", badUrlEmptyToken.Message, "Invalid URL message mismatch");
+
+                ConnectionCheckResult malformedUrlBlankToken = backend.TestConnectionAsync("not-a-url", "   ", persistOnSuccess: false).GetAwaiter().GetResult();
+                AssertFalse(malformedUrlBlankToken.Success, "Malformed URL with blank token must return Success == false");
+                AssertFalse(malformedUrlBlankToken.ShouldFocusToken, "Malformed URL with blank token must not focus token input");
+
+                ConnectionCheckResult validUrlEmptyToken = backend.TestConnectionAsync("https://openbis.example.org", "   ", persistOnSuccess: false).GetAwaiter().GetResult();
+                AssertFalse(validUrlEmptyToken.Success, "Valid URL with blank token must return Success == false");
+                AssertTrue(validUrlEmptyToken.ShouldFocusToken, "Valid URL with blank token must set ShouldFocusToken == true");
+                AssertEqual("Enter an openBIS Personal Access Token.", validUrlEmptyToken.Message, "Empty token message mismatch");
+
                 ConnectionCheckResult authFail = backend.TestConnectionAsync("https://openbis.example.org", "bad-tok", persistOnSuccess: true).GetAwaiter().GetResult();
                 AssertFalse(authFail.Success, "Auth failure must return Success == false");
                 AssertTrue(authFail.ShouldFocusToken, "Auth failure must set ShouldFocusToken == true");
@@ -2156,6 +2170,28 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual(LabelTemplateProfile.Molecule, mergedSync.MergedRows[1].TemplateProfile, "CRYSTAL should preserve Molecule profile");
                 AssertEqual("Lab Crystal", mergedSync.MergedRows[1].DisplayName, "CRYSTAL DisplayName should update from server description");
                 AssertFalse(mergedSync.MergedRows[2].IsSelected, "New WAFER should start unchecked");
+
+                // Verify GetSettingsSnapshotAsync sorts ConfiguredTypes by DisplayName then Code (CurrentCultureIgnoreCase)
+                OperationResult multiSave = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.ObjectTypes,
+                    ObjectTypes = new[]
+                    {
+                        new ObjectTypeRowDto { IsSelected = true, Code = "Z_TYPE", DisplayName = "Zeta", TemplateProfile = LabelTemplateProfile.Generic },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "B_TIE", DisplayName = "Alpha", TemplateProfile = LabelTemplateProfile.Generic },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "CUSTOM_NODE", DisplayName = "", TemplateProfile = LabelTemplateProfile.Generic },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "A_TIE", DisplayName = "alpha", TemplateProfile = LabelTemplateProfile.Molecule }
+                    }
+                }).GetAwaiter().GetResult();
+                AssertTrue(multiSave.Success, $"Multi-type wizard save should succeed, error: {multiSave.ErrorMessage}");
+
+                SettingsSnapshotDto sortedSnapshot = backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+                AssertEqual(4, sortedSnapshot.ConfiguredTypes.Count, "Expected 4 configured types in sorted snapshot");
+                AssertEqual("A_TIE", sortedSnapshot.ConfiguredTypes[0].Code, "Snapshot type[0] should break DisplayName tie by Code ascending");
+                AssertEqual("B_TIE", sortedSnapshot.ConfiguredTypes[1].Code, "Snapshot type[1] should be B_TIE after A_TIE tie-breaker");
+                AssertEqual("CUSTOM_NODE", sortedSnapshot.ConfiguredTypes[2].Code, "Snapshot type[2] should sort formatted DisplayName 'Custom Node' after 'Alpha'");
+                AssertEqual("Custom Node", sortedSnapshot.ConfiguredTypes[2].DisplayName, "Snapshot blank DisplayName should fall back to FormatFriendlyName");
+                AssertEqual("Z_TYPE", sortedSnapshot.ConfiguredTypes[3].Code, "Snapshot type[3] should be Zeta last");
             });
         }
 

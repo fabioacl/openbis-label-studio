@@ -371,7 +371,7 @@ namespace OpenBISLabelStudio.Backend.Services
                 {
                     Success = false,
                     Persisted = false,
-                    ShouldFocusToken = string.IsNullOrWhiteSpace(token) && !string.IsNullOrWhiteSpace(normalizedUrl),
+                    ShouldFocusToken = IsValidHttpUrl(normalizedUrl) && string.IsNullOrWhiteSpace(normalizedToken),
                     NormalizedUrl = normalizedUrl,
                     Message = inputError
                 };
@@ -484,11 +484,16 @@ namespace OpenBISLabelStudio.Backend.Services
                 });
             }
 
+            List<ObjectTypeRowDto> sortedRows = rows
+                .OrderBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+                .ThenBy(r => r.Code, StringComparer.CurrentCultureIgnoreCase)
+                .ToList();
+
             var snapshot = new SettingsSnapshotDto
             {
                 OpenBisUrl = savedApp?.OpenBisUrl ?? "",
                 Token = savedApp?.Token ?? "",
-                ConfiguredTypes = rows.AsReadOnly(),
+                ConfiguredTypes = sortedRows.AsReadOnly(),
                 Printers = BuildPrinterDropdownState(savedPrinters),
                 HasValidOpenBisConfig = _configService.HasValidOpenBisConfig(),
                 HasValidConfiguredTypes = _configService.HasValidConfiguredTypes(),
@@ -1389,6 +1394,7 @@ namespace OpenBISLabelStudio.Backend.Services
                     };
                 })
                 .OrderBy(t => t.DisplayText, StringComparer.CurrentCultureIgnoreCase)
+                .ThenBy(t => t.Code, StringComparer.CurrentCultureIgnoreCase)
                 .ToList()
                 .AsReadOnly();
         }
@@ -1516,6 +1522,12 @@ namespace OpenBISLabelStudio.Backend.Services
                 : LabelTemplateProfile.Generic;
         }
 
+        private static bool IsValidHttpUrl(string url)
+        {
+            return Uri.TryCreate(url, UriKind.Absolute, out Uri? parsedUri)
+                   && (parsedUri.Scheme == Uri.UriSchemeHttp || parsedUri.Scheme == Uri.UriSchemeHttps);
+        }
+
         private static bool ValidateConnectionInputs(
             string? rawUrl,
             string? rawToken,
@@ -1526,8 +1538,7 @@ namespace OpenBISLabelStudio.Backend.Services
             url = (rawUrl ?? "").Trim();
             token = (rawToken ?? "").Trim();
 
-            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? parsedUri)
-                || (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
+            if (!IsValidHttpUrl(url))
             {
                 errorMessage = "Enter a valid openBIS Instance URL starting with http:// or https://.";
                 return false;
