@@ -136,6 +136,9 @@ namespace OpenBISLabelStudio.Models
 
         [JsonProperty("description")]
         public string Description { get; set; } = "";
+
+        [JsonProperty("managedInternally")]
+        public bool ManagedInternally { get; set; }
     }
 
     /// <summary>

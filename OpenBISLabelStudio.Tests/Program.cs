@@ -66,6 +66,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendSortSamplesIsolatesInputAndBreaksDuplicateTies), BackendSortSamplesIsolatesInputAndBreaksDuplicateTies),
                 (nameof(BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters), BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters),
                 (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
+                (nameof(BackendFiltersOutManagedInternallyTypesInBuildAndServerSync), BackendFiltersOutManagedInternallyTypesInBuildAndServerSync),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -4140,6 +4141,98 @@ namespace OpenBISLabelStudio.Tests
                 }
             }
             return -1;
+        }
+
+        private static void BackendFiltersOutManagedInternallyTypesInBuildAndServerSync()
+        {
+            var serverTypes = new[]
+            {
+                new ModelTypes.OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Chemical Substance", ManagedInternally = false },
+                new ModelTypes.OpenBisTypeInfoDto { Code = "$STORAGE", Description = "Storage", ManagedInternally = true },
+                new ModelTypes.OpenBisTypeInfoDto { Code = "STORAGE_POSITION", Description = "Storage Position", ManagedInternally = true }
+            };
+
+            var saved = new[]
+            {
+                new ModelTypes.ConfiguredOpenBisType
+                {
+                    Code = "CRYSTAL",
+                    DisplayName = "Crystal",
+                    TemplateProfile = LabelTemplateProfile.Generic
+                }
+            };
+
+            List<ModelTypes.ConfiguredOpenBisType> built = LabelStudioBackend.BuildInitialTypeRows(serverTypes, saved);
+            AssertEqual(2, built.Count, "BuildInitialTypeRows must exclude ManagedInternally types while keeping offline saved types");
+            AssertEqual("SUBSTANCE", built[0].Code, "First built type should be SUBSTANCE");
+            AssertEqual("CRYSTAL", built[1].Code, "Saved offline CRYSTAL type should be preserved");
+
+            WithTempDir(tempRoot =>
+            {
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' not in sys.argv[1:]:\n" +
+                    "    sys.exit(2)\n" +
+                    "while True:\n" +
+                    "    line = sys.stdin.readline()\n" +
+                    "    if not line:\n" +
+                    "        break\n" +
+                    "    if not line.strip():\n" +
+                    "        continue\n" +
+                    "    req = json.loads(line)\n" +
+                    "    if req.get('action') == 'check':\n" +
+                    "        sys.stdout.write(json.dumps({'success': True, 'sessionActive': True}) + '\\n')\n" +
+                    "    elif req.get('action') == 'types':\n" +
+                    "        sys.stdout.write(json.dumps({'success': True, 'types': [\n" +
+                    "            {'code': 'SUBSTANCE', 'description': 'Substance', 'managedInternally': False},\n" +
+                    "            {'code': 'WAFER', 'description': 'Silicon Wafer'},\n" +
+                    "            {'code': '$STORAGE', 'description': 'System Storage', 'managedInternally': True}\n" +
+                    "        ]}) + '\\n')\n" +
+                    "    sys.stdout.flush()\n");
+
+                using (var client = new OpenBisClient(tempRoot))
+                {
+                    ModelTypes.OpenBisTypesResult rawTypes = client.QueryTypesAsync("https://openbis.example.org", "tok").GetAwaiter().GetResult();
+                    AssertTrue(rawTypes.Success, $"Stub QueryTypesAsync failed: {rawTypes.Error}");
+                    AssertEqual(3, rawTypes.Types.Count, "Stub payload should deserialize all 3 entries");
+                    AssertFalse(rawTypes.Types[1].ManagedInternally, "Omitted managedInternally should default to false");
+                    AssertTrue(rawTypes.Types[2].ManagedInternally, "managedInternally=true JSON must deserialize to ManagedInternally=true");
+                }
+
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new ModelTypes.AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok" });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ModelTypes.ConfiguredOpenBisType { Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic },
+                    new ModelTypes.ConfiguredOpenBisType { Code = "$STORAGE", DisplayName = "Original Saved Storage", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+
+                using var backend = new LabelStudioBackend(tempRoot, installedPrintersProvider: () => Array.Empty<string>());
+                var currentRows = new[]
+                {
+                    new ObjectTypeRowDto { IsSelected = true, Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic }
+                };
+
+                ServerTypeSyncResult sync = backend.FetchAndMergeServerTypesAsync(
+                    "https://openbis.example.org",
+                    "tok",
+                    currentRows).GetAwaiter().GetResult();
+
+                AssertTrue(sync.Success, $"FetchAndMergeServerTypesAsync failed: {sync.StatusMessage}");
+                AssertEqual(2, sync.ServerTypeCount, "ServerTypeCount must count only non-internal server types");
+                AssertEqual(3, sync.MergedRows.Count, "MergedRows should include SUBSTANCE, WAFER, and saved CRYSTAL only");
+                AssertFalse(sync.MergedRows.Any(r => r.Code == "$STORAGE"), "MergedRows must not include ManagedInternally server type");
+                AssertTrue(sync.MergedRows.Any(r => r.Code == "CRYSTAL" && r.IsSelected), "Checked saved CRYSTAL must remain selected");
+                AssertTrue(sync.MergedRows.Any(r => r.Code == "WAFER" && !r.IsSelected), "Non-internal WAFER with omitted flag must appear");
+
+                BackgroundTypeRefreshResult bgRefresh = backend.RefreshWorkspaceTypesAsync().GetAwaiter().GetResult();
+                AssertTrue(bgRefresh.Success, $"RefreshWorkspaceTypesAsync failed: {bgRefresh.ErrorMessage}");
+                AssertEqual(
+                    "Original Saved Storage",
+                    bgRefresh.ConfiguredTypes.First(t => t.Code == "$STORAGE").DisplayText,
+                    "MergeServerTypeDescriptions must ignore ManagedInternally server types");
+            });
         }
 
         private static void ShowOffscreen(Form form)

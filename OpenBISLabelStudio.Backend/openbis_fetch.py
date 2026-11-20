@@ -193,6 +193,20 @@ def extract_evaporation_temperature(spreadsheet):
     return ""
 
 
+def _is_truthy_flag(value):
+    """Interpret boolean/DataFrame cell flags cleanly, treating NaN/NA/None as False."""
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    try:
+        if value != value:
+            return False
+        return bool(value)
+    except (TypeError, ValueError):
+        return False
+
+
 def fetch_sample_types(openbis_url, token, session=None):
     try:
         o = session if session is not None else create_openbis_connection(openbis_url, token)
@@ -200,6 +214,8 @@ def fetch_sample_types(openbis_url, token, session=None):
         df = types.df
         type_list = []
         for idx, row in df.iterrows():
+            if _is_truthy_flag(row.get("managedInternally")):
+                continue
             code = str(row['code'])
             desc = str(row.get('description') or '').strip()
             if not desc or desc.lower() == 'none':

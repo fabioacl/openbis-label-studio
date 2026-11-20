@@ -106,7 +106,7 @@ namespace OpenBISLabelStudio.Backend.Services
 
             foreach (OpenBisTypeInfoDto serverType in serverTypes)
             {
-                if (serverType == null || string.IsNullOrWhiteSpace(serverType.Code))
+                if (serverType == null || serverType.ManagedInternally || string.IsNullOrWhiteSpace(serverType.Code))
                 {
                     continue;
                 }
@@ -545,11 +545,12 @@ namespace OpenBISLabelStudio.Backend.Services
                 }
 
                 List<OpenBisTypeInfoDto> validServerTypes = (result.Types ?? new List<OpenBisTypeInfoDto>())
-                    .Where(t => t != null && !string.IsNullOrWhiteSpace(t.Code))
+                    .Where(t => t != null && !t.ManagedInternally && !string.IsNullOrWhiteSpace(t.Code))
                     .Select(t => new OpenBisTypeInfoDto
                     {
                         Code = t.Code.Trim(),
-                        Description = t.Description?.Trim() ?? ""
+                        Description = t.Description?.Trim() ?? "",
+                        ManagedInternally = t.ManagedInternally
                     })
                     .ToList();
 
@@ -1427,6 +1428,7 @@ namespace OpenBISLabelStudio.Backend.Services
             foreach (OpenBisTypeInfoDto serverType in serverTypes)
             {
                 if (serverType != null
+                    && !serverType.ManagedInternally
                     && !string.IsNullOrWhiteSpace(serverType.Code)
                     && !string.IsNullOrWhiteSpace(serverType.Description))
                 {
