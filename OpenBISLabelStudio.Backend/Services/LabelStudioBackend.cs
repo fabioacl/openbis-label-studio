@@ -827,20 +827,23 @@ namespace OpenBISLabelStudio.Backend.Services
                 };
             }
 
-            List<SampleSummaryDto> samples = result.Data
-                .Where(s => s != null)
-                .Select(s => new SampleSummaryDto
-                {
-                    Name = s.Name ?? "",
-                    PermId = s.PermId ?? "",
-                    ModificationDate = s.ModificationDate ?? ""
-                })
-                .ToList();
+            IReadOnlyList<SampleSummaryDto> samples = SampleSorter.Sort(
+                result.Data
+                    .Where(s => s != null)
+                    .Select(s => new SampleSummaryDto
+                    {
+                        Name = s.Name ?? "",
+                        PermId = s.PermId ?? "",
+                        ModificationDate = s.ModificationDate ?? ""
+                    })
+                    .ToList(),
+                SampleSortField.ModificationDate,
+                SampleSortDirection.Descending);
 
             return new SampleListResultDto
             {
                 Success = true,
-                Samples = samples.AsReadOnly()
+                Samples = samples
             };
         }
 
@@ -1178,6 +1181,15 @@ namespace OpenBISLabelStudio.Backend.Services
         public byte[] GetFallbackPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile, string reason)
         {
             return LabelPreviewRenderer.CreateFallbackPreviewPng(slot, profile, reason);
+        }
+
+        /// <inheritdoc />
+        public IReadOnlyList<SampleSummaryDto> SortSamples(
+            IReadOnlyList<SampleSummaryDto>? samples,
+            SampleSortField sortBy,
+            SampleSortDirection direction)
+        {
+            return SampleSorter.Sort(samples, sortBy, direction);
         }
 
         /// <inheritdoc />

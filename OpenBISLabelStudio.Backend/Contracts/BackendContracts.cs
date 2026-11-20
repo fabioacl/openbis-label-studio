@@ -88,6 +88,30 @@ namespace OpenBISLabelStudio.Backend.Contracts
         byte[] GetLoadingPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile);
 
         byte[] GetFallbackPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile, string reason);
+
+        IReadOnlyList<SampleSummaryDto> SortSamples(
+            IReadOnlyList<SampleSummaryDto>? samples,
+            SampleSortField sortBy,
+            SampleSortDirection direction);
+    }
+
+    /// <summary>
+    /// Field by which loaded openBIS objects can be sorted.
+    /// </summary>
+    public enum SampleSortField
+    {
+        ModificationDate = 0,
+        Name = 1,
+        PermId = 2
+    }
+
+    /// <summary>
+    /// Direction for sorting loaded openBIS objects.
+    /// </summary>
+    public enum SampleSortDirection
+    {
+        Ascending = 0,
+        Descending = 1
     }
 
     /// <summary>

@@ -61,6 +61,9 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(SetupSettingsFormExamplePreviewExceptionDoesNotLeakUnobservedTask), SetupSettingsFormExamplePreviewExceptionDoesNotLeakUnobservedTask),
                 (nameof(BackendPrintSelectedLabelsStripsFreeTextForMoleculeAndRejectsMissingPrinter), BackendPrintSelectedLabelsStripsFreeTextForMoleculeAndRejectsMissingPrinter),
                 (nameof(BackendSaveWizardStepRoundTripsPersistEachStepCleanly), BackendSaveWizardStepRoundTripsPersistEachStepCleanly),
+                (nameof(BackendSampleSorterOrdersByNamePermIdAndModificationDate), BackendSampleSorterOrdersByNamePermIdAndModificationDate),
+                (nameof(BackendSampleSorterHandlesEdgeCasesWithoutThrowing), BackendSampleSorterHandlesEdgeCasesWithoutThrowing),
+                (nameof(BackendSortSamplesIsolatesInputAndBreaksDuplicateTies), BackendSortSamplesIsolatesInputAndBreaksDuplicateTies),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -2302,6 +2305,7 @@ namespace OpenBISLabelStudio.Tests
             public int RefreshWorkspaceTypesCalls { get; private set; }
             public int GetSettingsSnapshotCalls { get; private set; }
             public int ClearActiveSampleCalls { get; private set; }
+            public int SortSamplesCalls { get; private set; }
             public bool Disposed { get; private set; }
             public List<string> LoadObjectsCalls { get; } = new List<string>();
             public List<(string TypeCode, string PermId, string MagnetText, string FlaskText)> LoadSamplePreviewsCalls { get; }
@@ -2609,6 +2613,15 @@ namespace OpenBISLabelStudio.Tests
                 }
 
                 return slot == LabelTemplateType.SmallBox12mm ? _validPngBytes : new byte[] { 9, 8, 7 };
+            }
+
+            public IReadOnlyList<SampleSummaryDto> SortSamples(
+                IReadOnlyList<SampleSummaryDto>? samples,
+                SampleSortField sortBy,
+                SampleSortDirection direction)
+            {
+                SortSamplesCalls++;
+                return SampleSorter.Sort(samples, sortBy, direction);
             }
 
             public void Dispose()
@@ -3730,6 +3743,145 @@ namespace OpenBISLabelStudio.Tests
             InspectTypeTree(typeof(Form1));
             InspectTypeTree(typeof(SetupSettingsForm));
             InspectTypeTree(typeof(FormTokenRecoveryPrompter));
+        }
+
+        private static void BackendSampleSorterOrdersByNamePermIdAndModificationDate()
+        {
+            var nameSamples = new[]
+            {
+                new SampleSummaryDto { Name = "751a", PermId = "P-7", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "0000000000000000000010b", PermId = "P-9", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "0a", PermId = "P-1", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "x100000000000000000000000", PermId = "P-11", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "100a", PermId = "P-4", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "A10", PermId = "P-6", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "10a", PermId = "P-3", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "a2", PermId = "P-5", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "000000000000000000002b", PermId = "P-8", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "x99999999999999999999999", PermId = "P-10", ModificationDate = "2026-01-01T00:00:00Z" },
+                new SampleSummaryDto { Name = "2a", PermId = "P-2", ModificationDate = "2026-01-01T00:00:00Z" }
+            };
+
+            IReadOnlyList<SampleSummaryDto> ascNames = SampleSorter.Sort(nameSamples, SampleSortField.Name, SampleSortDirection.Ascending);
+            string[] expectedAscNames =
+            {
+                "0a", "2a", "000000000000000000002b", "10a", "0000000000000000000010b",
+                "100a", "751a", "a2", "A10",
+                "x99999999999999999999999", "x100000000000000000000000"
+            };
+            AssertEqual(expectedAscNames.Length, ascNames.Count, "Ascending natural name count mismatch");
+            for (int i = 0; i < expectedAscNames.Length; i++)
+            {
+                AssertEqual(expectedAscNames[i], ascNames[i].Name, $"Ascending name mismatch at index {i}");
+            }
+
+            IReadOnlyList<SampleSummaryDto> descNames = SampleSorter.Sort(nameSamples, SampleSortField.Name, SampleSortDirection.Descending);
+            for (int i = 0; i < expectedAscNames.Length; i++)
+            {
+                AssertEqual(expectedAscNames[expectedAscNames.Length - 1 - i], descNames[i].Name, $"Descending name mismatch at index {i}");
+            }
+
+            var permSamples = new[]
+            {
+                new SampleSummaryDto { Name = "x", PermId = "20260924152631220-10170", ModificationDate = "" },
+                new SampleSummaryDto { Name = "x", PermId = "ABC-10", ModificationDate = "" },
+                new SampleSummaryDto { Name = "x", PermId = "20251113162300874-4172", ModificationDate = "" },
+                new SampleSummaryDto { Name = "x", PermId = "ABC-2", ModificationDate = "" },
+                new SampleSummaryDto { Name = "x", PermId = "20260924152631220-8238", ModificationDate = "" }
+            };
+
+            IReadOnlyList<SampleSummaryDto> ascPerms = SampleSorter.Sort(permSamples, SampleSortField.PermId, SampleSortDirection.Ascending);
+            string[] expectedAscPerms =
+            {
+                "20251113162300874-4172",
+                "20260924152631220-8238",
+                "20260924152631220-10170",
+                "ABC-2",
+                "ABC-10"
+            };
+            for (int i = 0; i < expectedAscPerms.Length; i++)
+            {
+                AssertEqual(expectedAscPerms[i], ascPerms[i].PermId, $"Ascending PermId mismatch at index {i}");
+            }
+
+            IReadOnlyList<SampleSummaryDto> descPerms = SampleSorter.Sort(permSamples, SampleSortField.PermId, SampleSortDirection.Descending);
+            for (int i = 0; i < expectedAscPerms.Length; i++)
+            {
+                AssertEqual(expectedAscPerms[expectedAscPerms.Length - 1 - i], descPerms[i].PermId, $"Descending PermId mismatch at index {i}");
+            }
+
+            var modSamples = new[]
+            {
+                new SampleSummaryDto { Name = "oldest-offset", PermId = "P-OFFSET", ModificationDate = "2026-10-14T10:30:00+02:00" },
+                new SampleSummaryDto { Name = "newest-utc", PermId = "P-UTC", ModificationDate = "2026-10-14T09:00:00Z" },
+                new SampleSummaryDto { Name = "middle", PermId = "P-MID", ModificationDate = "2026-10-14T08:45:00Z" }
+            };
+
+            IReadOnlyList<SampleSummaryDto> descMod = SampleSorter.Sort(modSamples, SampleSortField.ModificationDate, SampleSortDirection.Descending);
+            AssertEqual("P-UTC", descMod[0].PermId, "Newest UTC timestamp should sort first in Descending");
+            AssertEqual("P-MID", descMod[1].PermId, "Middle timestamp should sort second in Descending");
+            AssertEqual("P-OFFSET", descMod[2].PermId, "08:30Z (+02:00) timestamp should sort last in Descending");
+
+            IReadOnlyList<SampleSummaryDto> ascMod = SampleSorter.Sort(modSamples, SampleSortField.ModificationDate, SampleSortDirection.Ascending);
+            AssertEqual("P-OFFSET", ascMod[0].PermId, "08:30Z (+02:00) timestamp should sort first in Ascending");
+            AssertEqual("P-MID", ascMod[1].PermId, "Middle timestamp should sort second in Ascending");
+            AssertEqual("P-UTC", ascMod[2].PermId, "Newest UTC timestamp should sort last in Ascending");
+        }
+
+        private static void BackendSampleSorterHandlesEdgeCasesWithoutThrowing()
+        {
+            IReadOnlyList<SampleSummaryDto> emptyFromNull = SampleSorter.Sort(null, SampleSortField.Name, SampleSortDirection.Ascending);
+            AssertEqual(0, emptyFromNull.Count, "Null sample list should yield empty list");
+
+            var trickyDates = new List<SampleSummaryDto>
+            {
+                null!,
+                new SampleSummaryDto { Name = "", PermId = "P-BAD-DATE", ModificationDate = "not-a-date" },
+                new SampleSummaryDto { Name = "named", PermId = "P-VALID-OLD", ModificationDate = "2025-11-13 16:23:00" },
+                new SampleSummaryDto { Name = "alpha", PermId = "", ModificationDate = "" },
+                new SampleSummaryDto { Name = null!, PermId = "P-NULL-FIELDS", ModificationDate = null! },
+                new SampleSummaryDto { Name = "valid-new", PermId = "P-VALID-NEW", ModificationDate = "2026-09-24T15:26:31Z" }
+            };
+
+            IReadOnlyList<SampleSummaryDto> modDesc = SampleSorter.Sort(trickyDates, SampleSortField.ModificationDate, SampleSortDirection.Descending);
+            AssertEqual(5, modDesc.Count, "Null entries should be filtered out");
+            AssertEqual("P-VALID-NEW", modDesc[0].PermId, "Newest valid date must come first in Descending");
+            AssertEqual("P-VALID-OLD", modDesc[1].PermId, "Older valid date must come second in Descending");
+
+            IReadOnlyList<SampleSummaryDto> modAsc = SampleSorter.Sort(trickyDates, SampleSortField.ModificationDate, SampleSortDirection.Ascending);
+            AssertEqual("P-VALID-OLD", modAsc[0].PermId, "Older valid date must come first in Ascending");
+            AssertEqual("P-VALID-NEW", modAsc[1].PermId, "Newer valid date must come second in Ascending");
+
+            IReadOnlyList<SampleSummaryDto> permAsc = SampleSorter.Sort(trickyDates, SampleSortField.PermId, SampleSortDirection.Ascending);
+            AssertEqual(5, permAsc.Count, "PermId sort must preserve all non-null items");
+            AssertEqual("", permAsc[4].PermId, "Blank PermId should sort after non-blank PermIds");
+
+            IReadOnlyList<SampleSummaryDto> nameAsc = SampleSorter.Sort(trickyDates, SampleSortField.Name, SampleSortDirection.Ascending);
+            AssertEqual("alpha", nameAsc[0].Name, "First non-empty name should sort first in Ascending");
+            AssertEqual("named", nameAsc[1].Name, "Second non-empty name should sort second in Ascending");
+            AssertEqual("valid-new", nameAsc[2].Name, "Third non-empty name should sort third in Ascending");
+        }
+
+        private static void BackendSortSamplesIsolatesInputAndBreaksDuplicateTies()
+        {
+            WithTempDir(tempRoot =>
+            {
+                using var backend = new LabelStudioBackend(tempRoot);
+                var original = new List<SampleSummaryDto>
+                {
+                    new SampleSummaryDto { Name = "0a", PermId = "20260924152631220-8238", ModificationDate = "2026-09-24T15:26:31Z" },
+                    new SampleSummaryDto { Name = "0a", PermId = "20251113162300874-4172", ModificationDate = "2025-11-13T16:23:00Z" }
+                };
+
+                IReadOnlyList<SampleSummaryDto> sortedAsc = backend.SortSamples(original, SampleSortField.Name, SampleSortDirection.Ascending);
+                IReadOnlyList<SampleSummaryDto> sortedDesc = backend.SortSamples(original, SampleSortField.Name, SampleSortDirection.Descending);
+
+                AssertEqual("20260924152631220-8238", original[0].PermId, "Caller list must not be mutated in place");
+                AssertEqual("20251113162300874-4172", sortedAsc[0].PermId, "Duplicate Name Ascending tie should break by PermId Ascending");
+                AssertEqual("20260924152631220-8238", sortedAsc[1].PermId, "Duplicate Name Ascending second item mismatch");
+                AssertEqual("20260924152631220-8238", sortedDesc[0].PermId, "Duplicate Name Descending tie should break by PermId Descending");
+                AssertEqual("20251113162300874-4172", sortedDesc[1].PermId, "Duplicate Name Descending second item mismatch");
+            });
         }
 
         private static void ShowOffscreen(Form form)
