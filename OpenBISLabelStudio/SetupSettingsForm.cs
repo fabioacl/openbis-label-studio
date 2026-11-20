@@ -995,10 +995,14 @@ namespace OpenBISLabelStudio
 
             try
             {
+                CommitGridEdits();
+                SyncVisibleGridToMaster();
+                IReadOnlyList<ObjectTypeRowDto> preFetchRows = GetMasterTypeRowsSnapshot();
+
                 ServerTypeSyncResult result = await _backend.FetchAndMergeServerTypesAsync(
                     url,
                     token,
-                    GetMasterTypeRowsSnapshot());
+                    preFetchRows);
 
                 if (IsDisposed || Disposing || fetchVersion != _typesFetchVersion)
                 {
@@ -1045,7 +1049,15 @@ namespace OpenBISLabelStudio
 
                 _validatedUrl = url;
                 _validatedToken = token;
-                ApplyTypeRows(result.MergedRows, syncedFromServer: true);
+
+                CommitGridEdits();
+                SyncVisibleGridToMaster();
+                IReadOnlyList<ObjectTypeRowDto> mergedWithLiveEdits = MergeInFlightTypeEdits(
+                    result.MergedRows,
+                    preFetchRows,
+                    GetMasterTypeRowsSnapshot());
+
+                ApplyTypeRows(mergedWithLiveEdits, syncedFromServer: true);
                 SetTypesStatus(result.StatusMessage, StatusSeverity.Success);
             }
             catch (Exception ex)
@@ -1067,6 +1079,102 @@ namespace OpenBISLabelStudio
                     SetTypesLoadingState(false);
                 }
             }
+        }
+
+        private static IReadOnlyList<ObjectTypeRowDto> MergeInFlightTypeEdits(
+            IReadOnlyList<ObjectTypeRowDto> mergedRows,
+            IReadOnlyList<ObjectTypeRowDto> preFetchRows,
+            IReadOnlyList<ObjectTypeRowDto> liveRows)
+        {
+            static Dictionary<string, ObjectTypeRowDto> IndexByCode(IReadOnlyList<ObjectTypeRowDto> rows)
+            {
+                var map = new Dictionary<string, ObjectTypeRowDto>(StringComparer.OrdinalIgnoreCase);
+                foreach (ObjectTypeRowDto row in rows)
+                {
+                    if (row != null && !string.IsNullOrWhiteSpace(row.Code))
+                    {
+                        string code = row.Code.Trim();
+                        map.TryAdd(code, row);
+                    }
+                }
+
+                return map;
+            }
+
+            Dictionary<string, ObjectTypeRowDto> preByCode = IndexByCode(preFetchRows);
+            Dictionary<string, ObjectTypeRowDto> liveByCode = IndexByCode(liveRows);
+            var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var combined = new List<ObjectTypeRowDto>(mergedRows.Count + liveRows.Count);
+
+            foreach (ObjectTypeRowDto mergedRow in mergedRows)
+            {
+                if (mergedRow == null || string.IsNullOrWhiteSpace(mergedRow.Code))
+                {
+                    continue;
+                }
+
+                string code = mergedRow.Code.Trim();
+                if (!seenCodes.Add(code))
+                {
+                    continue;
+                }
+
+                bool isSelected = mergedRow.IsSelected;
+                LabelTemplateProfile templateProfile = mergedRow.TemplateProfile;
+
+                if (liveByCode.TryGetValue(code, out ObjectTypeRowDto? liveRow))
+                {
+                    if (!preByCode.TryGetValue(code, out ObjectTypeRowDto? preRow))
+                    {
+                        isSelected = liveRow.IsSelected;
+                        templateProfile = liveRow.TemplateProfile;
+                    }
+                    else
+                    {
+                        if (liveRow.IsSelected != preRow.IsSelected)
+                        {
+                            isSelected = liveRow.IsSelected;
+                        }
+
+                        if (liveRow.TemplateProfile != preRow.TemplateProfile)
+                        {
+                            templateProfile = liveRow.TemplateProfile;
+                        }
+                    }
+                }
+
+                combined.Add(new ObjectTypeRowDto
+                {
+                    IsSelected = isSelected,
+                    Code = code,
+                    DisplayName = mergedRow.DisplayName,
+                    TemplateProfile = templateProfile
+                });
+            }
+
+            foreach (ObjectTypeRowDto liveRow in liveRows)
+            {
+                if (liveRow == null || string.IsNullOrWhiteSpace(liveRow.Code))
+                {
+                    continue;
+                }
+
+                string code = liveRow.Code.Trim();
+                if (!seenCodes.Add(code))
+                {
+                    continue;
+                }
+
+                combined.Add(new ObjectTypeRowDto
+                {
+                    IsSelected = liveRow.IsSelected,
+                    Code = code,
+                    DisplayName = liveRow.DisplayName,
+                    TemplateProfile = liveRow.TemplateProfile
+                });
+            }
+
+            return combined.AsReadOnly();
         }
 
         private void SetTypesLoadingState(bool loading)

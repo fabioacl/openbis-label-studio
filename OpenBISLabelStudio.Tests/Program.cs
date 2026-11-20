@@ -56,6 +56,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory), BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory),
                 (nameof(BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges), BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges),
                 (nameof(Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes), Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes),
+                (nameof(SetupSettingsFormPreservesInFlightGridEditsDuringBackgroundTypeSync), SetupSettingsFormPreservesInFlightGridEditsDuringBackgroundTypeSync),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -2304,6 +2305,9 @@ namespace OpenBISLabelStudio.Tests
             public List<(LabelTemplateType Slot, string FreeText)> RenderSlotWithFreeTextCalls { get; }
                 = new List<(LabelTemplateType, string)>();
             public List<LabelTemplateProfile> GetExamplePreviewsCalls { get; } = new List<LabelTemplateProfile>();
+            public IReadOnlyList<ObjectTypeRowDto>? SnapshotConfiguredTypes { get; set; }
+            public SettingsSaveRequest? LastSavedOfflineRequest { get; private set; }
+            public Func<string, string, IReadOnlyList<ObjectTypeRowDto>, CancellationToken, Task<ServerTypeSyncResult>>? OnFetchAndMergeServerTypesAsync { get; set; }
 
             public void WarmUpInBackground()
             {
@@ -2378,7 +2382,7 @@ namespace OpenBISLabelStudio.Tests
                 {
                     OpenBisUrl = "https://mock.openbis.example.org",
                     Token = "mock-token-123",
-                    ConfiguredTypes = new[]
+                    ConfiguredTypes = SnapshotConfiguredTypes ?? new[]
                     {
                         new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
                         new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTRATE", DisplayName = "Silicon Substrate", TemplateProfile = LabelTemplateProfile.Generic }
@@ -2407,6 +2411,11 @@ namespace OpenBISLabelStudio.Tests
                 IReadOnlyList<ObjectTypeRowDto> currentRows,
                 CancellationToken ct = default)
             {
+                if (OnFetchAndMergeServerTypesAsync != null)
+                {
+                    return OnFetchAndMergeServerTypesAsync(url, token, currentRows, ct);
+                }
+
                 return Task.FromResult(new ServerTypeSyncResult
                 {
                     Success = true,
@@ -2451,7 +2460,10 @@ namespace OpenBISLabelStudio.Tests
                 => Task.FromResult(OperationResult.Ok());
 
             public Task<OperationResult> SaveSettingsOfflineAsync(SettingsSaveRequest request, CancellationToken ct = default)
-                => Task.FromResult(OperationResult.Ok());
+            {
+                LastSavedOfflineRequest = request;
+                return Task.FromResult(OperationResult.Ok());
+            }
 
             public Task<SampleListResultDto> LoadObjectsForTypeAsync(
                 string typeCode,
@@ -2724,6 +2736,98 @@ namespace OpenBISLabelStudio.Tests
             }
 
             AssertFalse(stub.Disposed, "SetupSettingsForm must not dispose caller-owned backend");
+        }
+
+        private static void SetupSettingsFormPreservesInFlightGridEditsDuringBackgroundTypeSync()
+        {
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            var fetchStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFetch = new TaskCompletionSource<ServerTypeSyncResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            IReadOnlyList<ObjectTypeRowDto>? capturedPreFetchRows = null;
+
+            var stub = new StubLabelStudioBackend(validPng)
+            {
+                SnapshotConfiguredTypes = new[]
+                {
+                    new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ObjectTypeRowDto { IsSelected = false, Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic }
+                },
+                OnFetchAndMergeServerTypesAsync = async (url, token, currentRows, ct) =>
+                {
+                    capturedPreFetchRows = currentRows;
+                    fetchStarted.TrySetResult(true);
+                    return await releaseFetch.Task.ConfigureAwait(false);
+                }
+            };
+
+            using var settingsForm = new SetupSettingsForm(stub, SetupDialogMode.Settings, SetupWizardStep.ObjectTypes);
+            ShowOffscreen(settingsForm);
+
+            PumpEventsUntil(() => fetchStarted.Task.IsCompleted, "Timed out waiting for background type fetch to start");
+            var grid = FindControl<DataGridView>(settingsForm, "dgvObjectTypes");
+            var prgTypesLoading = FindControl<ProgressBar>(settingsForm, "prgTypesLoading");
+            AssertTrue(prgTypesLoading.Visible, "Expected prgTypesLoading to be visible while fetch is in flight");
+            AssertNotNull(capturedPreFetchRows, "Pre-fetch rows must be passed to FetchAndMergeServerTypesAsync");
+            AssertEqual(2, grid.Rows.Count, "Expected initial 2 rows in Object Types grid");
+
+            // User edits both rows in the unlocked grid while FetchAndMergeServerTypesAsync is still paused.
+            grid.Rows[0].Cells[0].Value = false;
+            grid.Rows[0].Cells[2].Value = "Generic / Free-text";
+            grid.Rows[1].Cells[0].Value = true;
+            grid.Rows[1].Cells[2].Value = "Molecule / Substance";
+
+            // Background fetch completes with stale pre-edit flags, an updated DisplayName, and a new server type.
+            releaseFetch.SetResult(new ServerTypeSyncResult
+            {
+                Success = true,
+                ServerTypeCount = 3,
+                StatusMessage = "Loaded 3 object type(s) from openBIS.",
+                MergedRows = new[]
+                {
+                    new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ObjectTypeRowDto { IsSelected = false, Code = "CRYSTAL", DisplayName = "Lab Crystal", TemplateProfile = LabelTemplateProfile.Generic },
+                    new ObjectTypeRowDto { IsSelected = false, Code = "WAFER", DisplayName = "Wafer", TemplateProfile = LabelTemplateProfile.Generic }
+                }
+            });
+
+            PumpEventsUntil(
+                () => settingsForm.TypesSyncedFromServer && !prgTypesLoading.Visible,
+                "Timed out waiting for background type fetch to apply merged rows");
+
+            AssertEqual(3, grid.Rows.Count, "Expected 3 rows after merging newly synced WAFER type");
+            AssertFalse(Convert.ToBoolean(grid.Rows[0].Cells[0].Value), "In-flight uncheck of SUBSTANCE must be preserved");
+            AssertEqual("Generic / Free-text", grid.Rows[0].Cells[2].Value?.ToString(), "In-flight profile change on SUBSTANCE must be preserved");
+
+            AssertTrue(Convert.ToBoolean(grid.Rows[1].Cells[0].Value), "In-flight check of CRYSTAL must be preserved");
+            AssertEqual("Molecule / Substance", grid.Rows[1].Cells[2].Value?.ToString(), "In-flight profile change on CRYSTAL must be preserved");
+            AssertTrue((grid.Rows[1].Cells[1].Value?.ToString() ?? "").Contains("Lab Crystal", StringComparison.Ordinal),
+                $"Server DisplayName update must still apply to CRYSTAL, actual: {grid.Rows[1].Cells[1].Value}");
+
+            AssertFalse(Convert.ToBoolean(grid.Rows[2].Cells[0].Value), "Newly discovered WAFER must start unchecked");
+            AssertEqual("Generic / Free-text", grid.Rows[2].Cells[2].Value?.ToString(), "Newly discovered WAFER should keep Generic profile");
+
+            AssertTrue(settingsForm.TrySaveSettingsOffline(out string saveError), $"Expected TrySaveSettingsOffline to succeed: {saveError}");
+            AssertNotNull(stub.LastSavedOfflineRequest, "Expected SaveSettingsOfflineAsync to capture saved rows");
+            ObjectTypeRowDto? savedCrystal = null;
+            ObjectTypeRowDto? savedSubstance = null;
+            foreach (ObjectTypeRowDto r in stub.LastSavedOfflineRequest!.ObjectTypes)
+            {
+                if (r.Code == "CRYSTAL") savedCrystal = r;
+                if (r.Code == "SUBSTANCE") savedSubstance = r;
+            }
+            AssertNotNull(savedCrystal, "Expected CRYSTAL row in saved payload");
+            AssertTrue(savedCrystal!.IsSelected, "Saved CRYSTAL IsSelected must reflect preserved in-flight edit");
+            AssertEqual(LabelTemplateProfile.Molecule, savedCrystal.TemplateProfile, "Saved CRYSTAL profile must reflect preserved in-flight edit");
+            AssertNotNull(savedSubstance, "Expected SUBSTANCE row in saved payload");
+            AssertFalse(savedSubstance!.IsSelected, "Saved SUBSTANCE IsSelected must reflect preserved in-flight edit");
+            AssertEqual(LabelTemplateProfile.Generic, savedSubstance.TemplateProfile, "Saved SUBSTANCE profile must reflect preserved in-flight edit");
         }
 
         private static void FrontendFormsContainNoBackendServiceOrSecretReferences()
