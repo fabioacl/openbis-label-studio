@@ -429,3 +429,49 @@ def test_main_dispatches_worker_flag(monkeypatch):
     mock_worker.assert_called_once()
     mock_parse.assert_not_called()
 
+
+def test_fetch_sample_types_excludes_managed_internally_types():
+    class FakePandasNA:
+        def __bool__(self):
+            raise TypeError("boolean value of NA is ambiguous")
+
+        def __ne__(self, other):
+            return self
+
+    class FakeTypesDf:
+        def iterrows(self):
+            return iter([
+                (0, {"code": "SUBSTANCE", "description": "Substance", "managedInternally": False}),
+                (1, {"code": "CRYSTAL", "description": "Crystal"}),
+                (2, {"code": "DEVICE", "description": "Device", "managedInternally": None}),
+                (3, {"code": "SUBSTRATE", "description": "Substrate", "managedInternally": float("nan")}),
+                (4, {"code": "WAFER", "description": "Wafer", "managedInternally": "false"}),
+                (5, {"code": "FOIL", "description": "Foil", "managedInternally": 0}),
+                (6, {"code": "FILM", "description": "Film", "managedInternally": FakePandasNA()}),
+                (7, {"code": "THIN_FILM", "description": "Thin Film", "managedInternally": "0"}),
+                (8, {"code": "STORAGE", "description": "Storage", "managedInternally": True}),
+                (9, {"code": "$STORAGE_POSITION", "description": "Storage Position", "managedInternally": "true"}),
+                (10, {"code": "SYSTEM_ENTRY", "description": "System Entry", "managedInternally": "TRUE"}),
+                (11, {"code": "PROTOCOL_INTERNAL", "description": "Internal Protocol", "managedInternally": 1}),
+            ])
+
+    client = MagicMock()
+    client.get_sample_types.return_value = MagicMock(df=FakeTypesDf())
+
+    with patch.object(openbis_fetch, "create_openbis_connection", return_value=client):
+        res = openbis_fetch.fetch_sample_types("https://openbis.example.org", "tok-123")
+
+    assert res["success"] is True
+    assert [t["code"] for t in res["types"]] == [
+        "SUBSTANCE",
+        "CRYSTAL",
+        "DEVICE",
+        "SUBSTRATE",
+        "WAFER",
+        "FOIL",
+        "FILM",
+        "THIN_FILM",
+    ]
+    assert all(set(t.keys()) == {"code", "description"} for t in res["types"])
+
+
