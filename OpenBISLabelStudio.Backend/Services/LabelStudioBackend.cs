@@ -27,7 +27,7 @@ namespace OpenBISLabelStudio.Backend.Services
         private readonly object _activeSampleLock = new object();
 
         private ActiveSampleState? _activeSample;
-        private bool _disposed;
+        private int _disposed;
 
         /// <summary>
         /// Initializes a backend rooted at <paramref name="baseDirectory"/> using <paramref name="pythonExecutable"/>.
@@ -211,7 +211,7 @@ namespace OpenBISLabelStudio.Backend.Services
         /// <inheritdoc />
         public void WarmUpInBackground()
         {
-            if (_disposed || _installedPrintersProvider != null)
+            if (Volatile.Read(ref _disposed) != 0 || _installedPrintersProvider != null)
             {
                 return;
             }
@@ -936,11 +936,6 @@ namespace OpenBISLabelStudio.Backend.Services
                 configuredTypes,
                 result.Details.SampleType);
 
-            lock (_activeSampleLock)
-            {
-                _activeSample = new ActiveSampleState(result.Details, activeProfile, normalizedTypeCode, normalizedPermId);
-            }
-
             string effectiveMagnetText = activeProfile == LabelTemplateProfile.Generic ? (magnetFreeText ?? "") : "";
             string effectiveFlaskText = activeProfile == LabelTemplateProfile.Generic ? (flaskFreeText ?? "") : "";
 
@@ -997,6 +992,15 @@ namespace OpenBISLabelStudio.Backend.Services
             }).ToArray();
 
             await Task.WhenAll(tasks).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+
+            lock (_activeSampleLock)
+            {
+                if (Volatile.Read(ref _disposed) == 0 && !ct.IsCancellationRequested)
+                {
+                    _activeSample = new ActiveSampleState(result.Details, activeProfile, normalizedTypeCode, normalizedPermId);
+                }
+            }
 
             return new SamplePreviewBundleDto
             {
@@ -1019,7 +1023,7 @@ namespace OpenBISLabelStudio.Backend.Services
             ActiveSampleState? snapshot;
             lock (_activeSampleLock)
             {
-                snapshot = _activeSample;
+                snapshot = Volatile.Read(ref _disposed) == 0 ? _activeSample : null;
             }
 
             if (snapshot == null)
@@ -1027,7 +1031,7 @@ namespace OpenBISLabelStudio.Backend.Services
                 return Array.Empty<byte>();
             }
 
-            string effectiveFreeText = snapshot.Profile == LabelTemplateProfile.Generic
+            string effectiveFreeText = snapshot.Profile == LabelTemplateProfile.Generic && slot != LabelTemplateType.SmallBox12mm
                 ? (freeText ?? "")
                 : "";
 
@@ -1106,7 +1110,7 @@ namespace OpenBISLabelStudio.Backend.Services
             ActiveSampleState? snapshot;
             lock (_activeSampleLock)
             {
-                snapshot = _activeSample;
+                snapshot = Volatile.Read(ref _disposed) == 0 ? _activeSample : null;
             }
 
             if (snapshot == null)
@@ -1179,12 +1183,11 @@ namespace OpenBISLabelStudio.Backend.Services
         /// <inheritdoc />
         public void Dispose()
         {
-            if (_disposed)
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
                 return;
             }
 
-            _disposed = true;
             _openBisClient.Dispose();
             ClearActiveSample();
         }

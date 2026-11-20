@@ -642,8 +642,9 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            _previewRenderCts = new CancellationTokenSource();
-            _ = LoadAndPrewarmExamplePreviewsAsync(profile, otherProfile, requestVersion, _previewRenderCts.Token);
+            var cts = new CancellationTokenSource();
+            _previewRenderCts = cts;
+            _ = LoadAndPrewarmExamplePreviewsAsync(profile, otherProfile, requestVersion, cts);
         }
 
         private bool AnySlotUncached(LabelTemplateProfile profile)
@@ -678,8 +679,9 @@ namespace OpenBISLabelStudio
             LabelTemplateProfile requestedProfile,
             LabelTemplateProfile secondaryProfile,
             long requestVersion,
-            CancellationToken cancellationToken)
+            CancellationTokenSource cts)
         {
+            CancellationToken cancellationToken = cts.Token;
             try
             {
                 if (AnySlotUncached(requestedProfile))
@@ -758,6 +760,34 @@ namespace OpenBISLabelStudio
             catch (OperationCanceledException)
             {
                 // Ignored when user switches profile, leaves ObjectTypes step, or closes the dialog.
+            }
+            catch (Exception ex)
+            {
+                // Guard fire-and-forget preview task against unobserved backend exceptions.
+                if (!_resourcesDisposed
+                    && !IsDisposed
+                    && !Disposing
+                    && !cancellationToken.IsCancellationRequested
+                    && requestVersion == _previewRenderVersion
+                    && _currentStep == SetupWizardStep.ObjectTypes
+                    && _activePreviewProfile == requestedProfile)
+                {
+                    foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+                    {
+                        if (!_previewPngCache.ContainsKey((requestedProfile, slot)))
+                        {
+                            Bitmap bmp = Form1.DecodePngBitmap(
+                                null,
+                                () => _backend.GetFallbackPreviewPng(slot, requestedProfile, $"Preview unavailable: {ex.Message}"));
+                            AssignPreviewPictureBoxImage(GetPreviewPictureBox(slot), bmp);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                Interlocked.CompareExchange(ref _previewRenderCts, null, cts);
+                cts.Dispose();
             }
         }
 
@@ -846,22 +876,20 @@ namespace OpenBISLabelStudio
 
         private void CancelPendingPreviewRender()
         {
-            if (_previewRenderCts == null)
+            CancellationTokenSource? existing = Interlocked.Exchange(ref _previewRenderCts, null);
+            if (existing == null)
             {
                 return;
             }
 
             try
             {
-                _previewRenderCts.Cancel();
+                existing.Cancel();
             }
             catch
             {
                 // Ignore cancellation failure during disposal.
             }
-
-            _previewRenderCts.Dispose();
-            _previewRenderCts = null;
         }
 
         private void UpdatePreviewToggleVisuals()

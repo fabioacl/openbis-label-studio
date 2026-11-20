@@ -56,7 +56,11 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory), BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory),
                 (nameof(BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges), BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges),
                 (nameof(Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes), Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes),
+                (nameof(Form1CancellationStopsStaleOpenBisCallsAndPreventsRecoveryOverSettings), Form1CancellationStopsStaleOpenBisCallsAndPreventsRecoveryOverSettings),
                 (nameof(SetupSettingsFormPreservesInFlightGridEditsDuringBackgroundTypeSync), SetupSettingsFormPreservesInFlightGridEditsDuringBackgroundTypeSync),
+                (nameof(SetupSettingsFormExamplePreviewExceptionDoesNotLeakUnobservedTask), SetupSettingsFormExamplePreviewExceptionDoesNotLeakUnobservedTask),
+                (nameof(BackendPrintSelectedLabelsStripsFreeTextForMoleculeAndRejectsMissingPrinter), BackendPrintSelectedLabelsStripsFreeTextForMoleculeAndRejectsMissingPrinter),
+                (nameof(BackendSaveWizardStepRoundTripsPersistEachStepCleanly), BackendSaveWizardStepRoundTripsPersistEachStepCleanly),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -2305,9 +2309,15 @@ namespace OpenBISLabelStudio.Tests
             public List<(LabelTemplateType Slot, string FreeText)> RenderSlotWithFreeTextCalls { get; }
                 = new List<(LabelTemplateType, string)>();
             public List<LabelTemplateProfile> GetExamplePreviewsCalls { get; } = new List<LabelTemplateProfile>();
+            public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string Reason)> GetFallbackPreviewCalls { get; }
+                = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
             public IReadOnlyList<ObjectTypeRowDto>? SnapshotConfiguredTypes { get; set; }
             public SettingsSaveRequest? LastSavedOfflineRequest { get; private set; }
+            public Func<ITokenRecoveryPrompter?, CancellationToken, Task<BackgroundTypeRefreshResult>>? OnRefreshWorkspaceTypesAsync { get; set; }
             public Func<string, string, IReadOnlyList<ObjectTypeRowDto>, CancellationToken, Task<ServerTypeSyncResult>>? OnFetchAndMergeServerTypesAsync { get; set; }
+            public Func<LabelTemplateProfile, Action<LabelTemplateType, byte[]>?, CancellationToken, Task<Dictionary<LabelTemplateType, byte[]>>>? OnGetExamplePreviewsAsync { get; set; }
+            public Func<string, ITokenRecoveryPrompter?, CancellationToken, Task<SampleListResultDto>>? OnLoadObjectsForTypeAsync { get; set; }
+            public Func<string, string, string, string, Action<LabelTemplateType, byte[]>?, ITokenRecoveryPrompter?, CancellationToken, Task<SamplePreviewBundleDto>>? OnLoadSamplePreviewsAsync { get; set; }
 
             public void WarmUpInBackground()
             {
@@ -2348,6 +2358,11 @@ namespace OpenBISLabelStudio.Tests
                 CancellationToken ct = default)
             {
                 RefreshWorkspaceTypesCalls++;
+                if (OnRefreshWorkspaceTypesAsync != null)
+                {
+                    return OnRefreshWorkspaceTypesAsync(recoveryPrompter, ct);
+                }
+
                 return Task.FromResult(new BackgroundTypeRefreshResult
                 {
                     Success = true,
@@ -2435,6 +2450,11 @@ namespace OpenBISLabelStudio.Tests
                     GetExamplePreviewsCalls.Add(profile);
                 }
 
+                if (OnGetExamplePreviewsAsync != null)
+                {
+                    return await OnGetExamplePreviewsAsync(profile, onSlotReady, ct).ConfigureAwait(false);
+                }
+
                 var result = new Dictionary<LabelTemplateType, byte[]>
                 {
                     [LabelTemplateType.SmallBox12mm] = _validPngBytes,
@@ -2475,6 +2495,11 @@ namespace OpenBISLabelStudio.Tests
                     LoadObjectsCalls.Add(typeCode);
                 }
 
+                if (OnLoadObjectsForTypeAsync != null)
+                {
+                    return OnLoadObjectsForTypeAsync(typeCode, recoveryPrompter, ct);
+                }
+
                 return Task.FromResult(new SampleListResultDto
                 {
                     Success = true,
@@ -2507,6 +2532,18 @@ namespace OpenBISLabelStudio.Tests
                 lock (_callsLock)
                 {
                     LoadSamplePreviewsCalls.Add((typeCode, permId, magnetFreeText, flaskFreeText));
+                }
+
+                if (OnLoadSamplePreviewsAsync != null)
+                {
+                    return await OnLoadSamplePreviewsAsync(
+                        typeCode,
+                        permId,
+                        magnetFreeText,
+                        flaskFreeText,
+                        onSlotReady,
+                        recoveryPrompter,
+                        ct).ConfigureAwait(false);
                 }
 
                 var slots = new Dictionary<LabelTemplateType, byte[]>
@@ -2565,7 +2602,14 @@ namespace OpenBISLabelStudio.Tests
                 => _validPngBytes;
 
             public byte[] GetFallbackPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile, string reason)
-                => slot == LabelTemplateType.SmallBox12mm ? _validPngBytes : new byte[] { 9, 8, 7 };
+            {
+                lock (_callsLock)
+                {
+                    GetFallbackPreviewCalls.Add((slot, profile, reason));
+                }
+
+                return slot == LabelTemplateType.SmallBox12mm ? _validPngBytes : new byte[] { 9, 8, 7 };
+            }
 
             public void Dispose()
             {
@@ -2828,6 +2872,758 @@ namespace OpenBISLabelStudio.Tests
             AssertNotNull(savedSubstance, "Expected SUBSTANCE row in saved payload");
             AssertFalse(savedSubstance!.IsSelected, "Saved SUBSTANCE IsSelected must reflect preserved in-flight edit");
             AssertEqual(LabelTemplateProfile.Generic, savedSubstance.TemplateProfile, "Saved SUBSTANCE profile must reflect preserved in-flight edit");
+        }
+
+        private static byte[] CreateValid1x1PngBytes()
+        {
+            using var bmp = new Bitmap(1, 1);
+            using var ms = new MemoryStream();
+            bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            return ms.ToArray();
+        }
+
+        private static void Form1CancellationStopsStaleOpenBisCallsAndPreventsRecoveryOverSettings()
+        {
+            byte[] validPng = CreateValid1x1PngBytes();
+            Exception? uiThreadException = null;
+            void ThreadExceptionHandler(object? sender, ThreadExceptionEventArgs e)
+            {
+                uiThreadException ??= e.Exception;
+            }
+
+            Application.ThreadException += ThreadExceptionHandler;
+            try
+            {
+                var refreshStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var refreshExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                CancellationToken refreshCt = CancellationToken.None;
+                int recoveryPromptAttempts = 0;
+
+                var loadObjQueue = new Queue<(string TypeCode, CancellationToken Ct, TaskCompletionSource<bool> Started, TaskCompletionSource<bool> Exited)>();
+                bool blockLoadObjects = true;
+                bool blockSamplePreviews = false;
+                CancellationToken samplePreviewCt = CancellationToken.None;
+                var samplePreviewStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var samplePreviewExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var stub = new StubLabelStudioBackend(validPng)
+                {
+                    OnRefreshWorkspaceTypesAsync = async (prompter, ct) =>
+                    {
+                        refreshCt = ct;
+                        refreshStarted.TrySetResult(true);
+                        try
+                        {
+                            await Task.Delay(Timeout.Infinite, ct);
+                            if (prompter != null)
+                            {
+                                Interlocked.Increment(ref recoveryPromptAttempts);
+                                await prompter.PromptForNewTokenAsync("https://mock", "expired", ct);
+                            }
+
+                            return new BackgroundTypeRefreshResult { Success = true };
+                        }
+                        finally
+                        {
+                            refreshExited.TrySetResult(true);
+                        }
+                    },
+                    OnLoadObjectsForTypeAsync = async (typeCode, prompter, ct) =>
+                    {
+                        if (!blockLoadObjects)
+                        {
+                            return new SampleListResultDto
+                            {
+                                Success = true,
+                                Samples = new[]
+                                {
+                                    new SampleSummaryDto
+                                    {
+                                        Name = "MockSubstrate-1",
+                                        PermId = "PERM-MOCK-1",
+                                        ModificationDate = "2026-11-20"
+                                    }
+                                }
+                            };
+                        }
+
+                        var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        lock (loadObjQueue)
+                        {
+                            loadObjQueue.Enqueue((typeCode, ct, started, exited));
+                        }
+                        started.TrySetResult(true);
+
+                        try
+                        {
+                            await Task.Delay(Timeout.Infinite, ct);
+                            if (prompter != null)
+                            {
+                                Interlocked.Increment(ref recoveryPromptAttempts);
+                                await prompter.PromptForNewTokenAsync("https://mock", "expired", ct);
+                            }
+
+                            return new SampleListResultDto { Success = true };
+                        }
+                        finally
+                        {
+                            exited.TrySetResult(true);
+                        }
+                    },
+                    OnLoadSamplePreviewsAsync = async (typeCode, permId, magnetFreeText, flaskFreeText, onSlotReady, prompter, ct) =>
+                    {
+                        if (!blockSamplePreviews)
+                        {
+                            var slots = new Dictionary<LabelTemplateType, byte[]>
+                            {
+                                [LabelTemplateType.SmallBox12mm] = validPng,
+                                [LabelTemplateType.Magnet12mm] = validPng,
+                                [LabelTemplateType.Flask24mm] = validPng
+                            };
+                            foreach (var kvp in slots)
+                            {
+                                onSlotReady?.Invoke(kvp.Key, kvp.Value);
+                            }
+
+                            return new SamplePreviewBundleDto
+                            {
+                                Success = true,
+                                Profile = LabelTemplateProfile.Generic,
+                                SampleName = "MockSubstrate-1",
+                                PermId = permId,
+                                SlotPreviews = slots
+                            };
+                        }
+
+                        samplePreviewCt = ct;
+                        samplePreviewStarted.TrySetResult(true);
+                        try
+                        {
+                            await Task.Delay(Timeout.Infinite, ct);
+                            if (prompter != null)
+                            {
+                                Interlocked.Increment(ref recoveryPromptAttempts);
+                                await prompter.PromptForNewTokenAsync("https://mock", "expired", ct);
+                            }
+
+                            return new SamplePreviewBundleDto { Success = true };
+                        }
+                        finally
+                        {
+                            samplePreviewExited.TrySetResult(true);
+                        }
+                    }
+                };
+
+                FieldInfo? hasLoadedSampleField = typeof(Form1).GetField("_hasLoadedSample", BindingFlags.NonPublic | BindingFlags.Instance);
+                AssertNotNull(hasLoadedSampleField, "Expected _hasLoadedSample field on Form1");
+
+                using (var form = new Form1(stub))
+                {
+                    ShowOffscreen(form);
+
+                    var cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
+                    var cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+                    var lblSelectedType = FindControl<Label>(form, "selectedOpenbisTypeLabel");
+                    var lblStatus = FindControl<Label>(form, "lblStatusNotice");
+                    var prgLoading = FindControl<ProgressBar>(form, "prgLoading");
+                    var btnLoad = FindControl<Button>(form, "loadPrintTemplates");
+                    var btnPrint = FindControl<Button>(form, "btnPrintLabel");
+                    var btnSettings = FindControl<Button>(form, "btnSettings");
+                    var picSmallBox = FindControl<PictureBox>(form, "smallBoxLabelPreview");
+                    var picMagnet = FindControl<PictureBox>(form, "magnetLabelPreview");
+                    var picFlask = FindControl<PictureBox>(form, "flaskLabelPreview");
+
+                    void OpenSettingsAndAssert(Action assertWhileModalOpen)
+                    {
+                        Exception? modalError = null;
+                        int elapsedTicks = 0;
+                        using var modalTimer = new System.Windows.Forms.Timer { Interval = 20 };
+                        modalTimer.Tick += (_, _) =>
+                        {
+                            SetupSettingsForm? openSettings = null;
+                            foreach (Form openForm in Application.OpenForms)
+                            {
+                                if (openForm is SetupSettingsForm sf && sf.Visible)
+                                {
+                                    openSettings = sf;
+                                    break;
+                                }
+                            }
+
+                            if (openSettings == null)
+                            {
+                                elapsedTicks++;
+                                if (elapsedTicks > 150)
+                                {
+                                    modalTimer.Stop();
+                                }
+                                return;
+                            }
+
+                            modalTimer.Stop();
+                            try
+                            {
+                                assertWhileModalOpen();
+                            }
+                            catch (Exception ex)
+                            {
+                                modalError = ex;
+                            }
+                            finally
+                            {
+                                openSettings.DialogResult = DialogResult.Cancel;
+                                openSettings.Close();
+                            }
+                        };
+
+                        modalTimer.Start();
+                        try
+                        {
+                            btnSettings.PerformClick();
+                        }
+                        finally
+                        {
+                            modalTimer.Stop();
+                        }
+
+                        if (modalError != null)
+                        {
+                            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(modalError).Throw();
+                        }
+                    }
+
+                    int FindTypeIndex(string code)
+                    {
+                        for (int i = 0; i < cmbTypes.Items.Count; i++)
+                        {
+                            if (cmbTypes.Items[i] is TypeOptionDto opt
+                                && string.Equals(opt.Code, code, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return i;
+                            }
+                        }
+
+                        throw new InvalidOperationException($"Type '{code}' not found in openbisTypeComboBox.");
+                    }
+
+                    // 1. Opening Settings while RefreshWorkspaceTypesAsync is in flight cancels its token immediately
+                    //    and prevents expired-token recovery from opening over Settings.
+                    PumpEventsUntil(() => refreshStarted.Task.IsCompleted, "Timed out waiting for RefreshWorkspaceTypesAsync to start");
+                    AssertFalse(refreshCt.IsCancellationRequested, "Refresh token must not be canceled before Settings is clicked");
+
+                    OpenSettingsAndAssert(() =>
+                    {
+                        AssertTrue(refreshCt.IsCancellationRequested,
+                            "Opening Settings must immediately cancel in-flight RefreshWorkspaceTypesAsync CancellationToken");
+                    });
+
+                    PumpEventsUntil(() => refreshExited.Task.IsCompleted, "Timed out waiting for canceled RefreshWorkspaceTypesAsync to unwind");
+                    AssertEqual(0, Volatile.Read(ref recoveryPromptAttempts), "Canceled refresh must not invoke recovery prompter");
+                    AssertFalse(lblStatus.Visible, "Canceled startup refresh must not display an error notice");
+
+                    // 2. Switching between types and back to placeholder cancels prior LoadObjectsForTypeAsync calls cleanly.
+                    int substanceIdx = FindTypeIndex("SUBSTANCE");
+                    int substrateIdx = FindTypeIndex("SUBSTRATE");
+
+                    cmbTypes.SelectedIndex = substanceIdx;
+                    PumpEventsUntil(() => loadObjQueue.Count >= 1, "Timed out waiting for SUBSTANCE LoadObjectsForTypeAsync");
+                    var call1 = loadObjQueue.Dequeue();
+                    AssertEqual("SUBSTANCE", call1.TypeCode, "Expected SUBSTANCE load call");
+                    AssertFalse(call1.Ct.IsCancellationRequested, "First type selection token should initially be active");
+                    AssertTrue(prgLoading.Visible, "Loading bar should be visible while SUBSTANCE loads");
+                    AssertFalse(cmbObjects.Enabled, "Objects combo should be disabled while SUBSTANCE loads");
+
+                    cmbTypes.SelectedIndex = substrateIdx;
+                    AssertTrue(call1.Ct.IsCancellationRequested,
+                        "Switching to another type must immediately cancel prior LoadObjectsForTypeAsync token");
+                    PumpEventsUntil(() => loadObjQueue.Count >= 1, "Timed out waiting for SUBSTRATE LoadObjectsForTypeAsync");
+                    var call2 = loadObjQueue.Dequeue();
+                    AssertEqual("SUBSTRATE", call2.TypeCode, "Expected SUBSTRATE load call");
+                    AssertTrue(prgLoading.Visible, "Loading bar must remain visible while SUBSTRATE loads");
+
+                    // Switch back to placeholder (index 0) -> must immediately cancel SUBSTRATE token and reset UI cleanly.
+                    cmbTypes.SelectedIndex = 0;
+                    AssertTrue(call2.Ct.IsCancellationRequested,
+                        "Switching to placeholder must immediately cancel in-flight LoadObjectsForTypeAsync token");
+                    PumpEventsUntil(
+                        () => call1.Exited.Task.IsCompleted && call2.Exited.Task.IsCompleted,
+                        "Timed out waiting for canceled type-selection loads to unwind");
+
+                    AssertFalse(prgLoading.Visible, "Loading bar must hide after placeholder reset");
+                    AssertTrue(cmbObjects.Enabled && btnLoad.Enabled && btnPrint.Enabled,
+                        "Sample query controls must be re-enabled after placeholder reset");
+                    AssertEqual(0, cmbObjects.Items.Count, "Objects combo must remain empty after canceled loads");
+                    AssertEqual("Type:", lblSelectedType.Text, "Selected type label must reset to Type:");
+
+                    // 3. Opening Settings while LoadObjectsForTypeAsync is in flight cancels token and re-enables UI.
+                    cmbTypes.SelectedIndex = substrateIdx;
+                    PumpEventsUntil(() => loadObjQueue.Count >= 1, "Timed out waiting for SUBSTRATE LoadObjectsForTypeAsync before Settings");
+                    var call3 = loadObjQueue.Dequeue();
+
+                    OpenSettingsAndAssert(() =>
+                    {
+                        AssertTrue(call3.Ct.IsCancellationRequested,
+                            "Opening Settings must immediately cancel in-flight LoadObjectsForTypeAsync token");
+                    });
+
+                    PumpEventsUntil(() => call3.Exited.Task.IsCompleted, "Timed out waiting for canceled LoadObjectsForTypeAsync to unwind");
+                    AssertFalse(prgLoading.Visible, "Loading bar must hide after Settings cancels in-flight LoadObjectsForTypeAsync");
+                    AssertTrue(cmbObjects.Enabled && btnLoad.Enabled && btnPrint.Enabled,
+                        "Sample query controls must be enabled after canceling Settings");
+
+                    // 4. Opening Settings while LoadSamplePreviewsAsync is in flight cancels token, clears loading placeholders,
+                    //    and restores controls cleanly.
+                    blockLoadObjects = false;
+                    blockSamplePreviews = true;
+                    cmbTypes.SelectedIndex = 0;
+                    cmbTypes.SelectedIndex = substrateIdx;
+                    PumpEventsUntil(() => cmbObjects.Items.Count == 1, "Timed out waiting for SUBSTRATE sample item");
+
+                    btnLoad.PerformClick();
+                    PumpEventsUntil(() => samplePreviewStarted.Task.IsCompleted, "Timed out waiting for LoadSamplePreviewsAsync to start");
+                    AssertNotNull(picSmallBox.Image, "Expected loading placeholder preview image while sample load is in flight");
+                    AssertTrue(prgLoading.Visible, "Loading bar must be visible during sample preview load");
+                    AssertFalse(btnPrint.Enabled, "Print button must be disabled during sample preview load");
+
+                    OpenSettingsAndAssert(() =>
+                    {
+                        AssertTrue(samplePreviewCt.IsCancellationRequested,
+                            "Opening Settings must immediately cancel in-flight LoadSamplePreviewsAsync token");
+                    });
+
+                    PumpEventsUntil(() => samplePreviewExited.Task.IsCompleted, "Timed out waiting for canceled LoadSamplePreviewsAsync to unwind");
+                    AssertNull(picSmallBox.Image, "SmallBox loading placeholder image must be cleared when Settings cancels in-flight load");
+                    AssertNull(picMagnet.Image, "Magnet loading placeholder image must be cleared when Settings cancels in-flight load");
+                    AssertNull(picFlask.Image, "Flask loading placeholder image must be cleared when Settings cancels in-flight load");
+                    AssertFalse((bool)hasLoadedSampleField!.GetValue(form)!, "_hasLoadedSample must remain false after canceled load");
+                    AssertFalse(prgLoading.Visible, "Loading bar must hide after Settings cancels sample load");
+                    AssertTrue(cmbObjects.Enabled && btnLoad.Enabled && btnPrint.Enabled,
+                        "Controls must be re-enabled after Settings cancels sample load");
+
+                    // 5. Opening Settings when a sample is ALREADY loaded (no sample load in flight) preserves _hasLoadedSample and cards.
+                    blockSamplePreviews = false;
+                    btnLoad.PerformClick();
+                    PumpEventsUntil(
+                        () => (bool)hasLoadedSampleField.GetValue(form)! && picSmallBox.Image != null,
+                        "Timed out waiting for sample load completion");
+
+                    OpenSettingsAndAssert(() => { });
+                    AssertTrue((bool)hasLoadedSampleField.GetValue(form)!,
+                        "_hasLoadedSample must be preserved when opening/canceling Settings with no load in flight");
+                    AssertNotNull(picSmallBox.Image, "Existing preview cards must remain visible when no sample load was in flight");
+                    AssertEqual(0, Volatile.Read(ref recoveryPromptAttempts), "No recovery prompt should fire when operations are canceled");
+                }
+
+                // 6. Disposing Form1 while RefreshWorkspaceTypesAsync & LoadObjectsForTypeAsync are in flight cancels cleanly without throwing.
+                refreshStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                refreshExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                refreshCt = CancellationToken.None;
+                blockLoadObjects = true;
+                loadObjQueue.Clear();
+
+                CancellationToken disposeLoadCt = CancellationToken.None;
+                TaskCompletionSource<bool>? disposeLoadExited = null;
+                using (var disposingForm = new Form1(stub))
+                {
+                    ShowOffscreen(disposingForm);
+                    PumpEventsUntil(() => refreshStarted.Task.IsCompleted, "Timed out waiting for refresh start before Form1 dispose");
+
+                    var cmbTypes = FindControl<ComboBox>(disposingForm, "openbisTypeComboBox");
+                    cmbTypes.SelectedIndex = 1;
+                    PumpEventsUntil(() => loadObjQueue.Count == 1, "Timed out waiting for LoadObjectsForTypeAsync start before Form1 dispose");
+                    var pending = loadObjQueue.Dequeue();
+                    disposeLoadCt = pending.Ct;
+                    disposeLoadExited = pending.Exited;
+                }
+
+                AssertTrue(refreshCt.IsCancellationRequested, "Disposing Form1 must cancel pending RefreshWorkspaceTypesAsync token");
+                AssertTrue(disposeLoadCt.IsCancellationRequested, "Disposing Form1 must cancel pending LoadObjectsForTypeAsync token");
+                PumpEventsUntil(
+                    () => refreshExited.Task.IsCompleted && disposeLoadExited!.Task.IsCompleted,
+                    "Timed out waiting for background tasks to exit after Form1 dispose");
+                AssertNull(uiThreadException, $"Unexpected UI thread exception during cancellation test: {uiThreadException}");
+            }
+            finally
+            {
+                Application.ThreadException -= ThreadExceptionHandler;
+            }
+        }
+
+        private static void SetupSettingsFormExamplePreviewExceptionDoesNotLeakUnobservedTask()
+        {
+            byte[] validPng = CreateValid1x1PngBytes();
+            Exception? unobservedEx = null;
+            void UnobservedHandler(object? sender, UnobservedTaskExceptionEventArgs e)
+            {
+                unobservedEx = e.Exception;
+                e.SetObserved();
+            }
+
+            TaskScheduler.UnobservedTaskException += UnobservedHandler;
+            try
+            {
+                var failedTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var blockedMoleculeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var blockedMoleculeExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                CancellationToken blockedMoleculeCt = CancellationToken.None;
+
+                var stub = new StubLabelStudioBackend(validPng)
+                {
+                    OnGetExamplePreviewsAsync = async (profile, onSlotReady, ct) =>
+                    {
+                        if (profile == LabelTemplateProfile.Molecule)
+                        {
+                            blockedMoleculeCt = ct;
+                            blockedMoleculeStarted.TrySetResult(true);
+                            try
+                            {
+                                await Task.Delay(Timeout.Infinite, ct);
+                                return new Dictionary<LabelTemplateType, byte[]>();
+                            }
+                            finally
+                            {
+                                blockedMoleculeExited.TrySetResult(true);
+                            }
+                        }
+
+                        failedTcs.TrySetResult(true);
+                        throw new InvalidOperationException("Simulated example preview failure");
+                    }
+                };
+
+                using (var form = new SetupSettingsForm(stub, SetupDialogMode.Settings, SetupWizardStep.ObjectTypes))
+                {
+                    form.ApplyTypeRows(new[]
+                    {
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule }
+                    });
+                    ShowOffscreen(form);
+
+                    PumpEventsUntil(() => blockedMoleculeStarted.Task.IsCompleted, "Timed out waiting for Molecule example preview render");
+
+                    // Switching to Generic cancels Molecule's token WITHOUT disposing it prematurely while blocked,
+                    // then Generic throws an unexpected exception which must be caught safely inside LoadAndPrewarmExamplePreviewsAsync.
+                    FindControl<Button>(form, "btnPreviewGeneric").PerformClick();
+                    AssertTrue(blockedMoleculeCt.IsCancellationRequested,
+                        "Switching preview profile must cancel prior Molecule preview token");
+
+                    PumpEventsUntil(
+                        () => blockedMoleculeExited.Task.IsCompleted && failedTcs.Task.IsCompleted
+                              && stub.GetFallbackPreviewCalls.Exists(c =>
+                                  c.Profile == LabelTemplateProfile.Generic
+                                  && c.Reason.Contains("Simulated example preview failure", StringComparison.Ordinal)),
+                        "Timed out waiting for canceled Molecule render and faulted Generic fallback render");
+
+                    AssertNotNull(FindControl<PictureBox>(form, "picPreviewSmallBox").Image,
+                        "Fallback preview image must be populated after example preview failure");
+                    AssertNotNull(FindControl<PictureBox>(form, "picPreviewMagnet").Image,
+                        "Fallback Magnet image must be populated after example preview failure");
+                    AssertNotNull(FindControl<PictureBox>(form, "picPreviewFlask").Image,
+                        "Fallback Flask image must be populated after example preview failure");
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                AssertNull(unobservedEx, $"Unexpected unobserved task exception: {unobservedEx}");
+            }
+            finally
+            {
+                TaskScheduler.UnobservedTaskException -= UnobservedHandler;
+            }
+        }
+
+        private sealed class CapturingLabelPreviewRenderer : LabelPreviewRenderer
+        {
+            public CapturingLabelPreviewRenderer(
+                AppConfigService configService,
+                Func<IReadOnlyList<string>> installedPrintersProvider)
+                : base(configService, installedPrintersProvider)
+            {
+            }
+
+            public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string FreeText)> RenderedCalls { get; }
+                = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
+            public LabelTemplateProfile? LastPrintProfile { get; private set; }
+            public SampleDetailsDto? LastPrintDetails { get; private set; }
+            public IReadOnlyList<LabelPrintJobRequest>? LastPrintJobs { get; private set; }
+
+            public override Task<byte[]> RenderTemplatePreviewPngAsync(
+                LabelTemplateType slot,
+                LabelTemplateProfile profile,
+                SampleDetailsDto details,
+                string freeText = "",
+                CancellationToken cancellationToken = default)
+            {
+                RenderedCalls.Add((slot, profile, freeText));
+                return base.RenderTemplatePreviewPngAsync(slot, profile, details, freeText, cancellationToken);
+            }
+
+            public override Task<LabelPrintBatchResult> PrintLabelsAsync(
+                LabelTemplateProfile profile,
+                SampleDetailsDto details,
+                IReadOnlyList<LabelPrintJobRequest> jobs,
+                CancellationToken cancellationToken = default)
+            {
+                LastPrintProfile = profile;
+                LastPrintDetails = details;
+                LastPrintJobs = jobs;
+                return base.PrintLabelsAsync(profile, details, jobs, cancellationToken);
+            }
+        }
+
+        private static void BackendPrintSelectedLabelsStripsFreeTextForMoleculeAndRejectsMissingPrinter()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "valid-tok"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ConfiguredOpenBisType { Code = "SUBSTRATE", DisplayName = "Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+                configService.SavePrinterConfig(AppConfigService.CreateDefaultPrinterConfig());
+
+                // Create placeholder .lbx files so PrintLabelsBatch proceeds to installed-printer verification without real b-PAC hardware.
+                Directory.CreateDirectory(configService.TemplatesDirectoryPath);
+                foreach (LabelTemplateProfile profile in Enum.GetValues<LabelTemplateProfile>())
+                {
+                    foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+                    {
+                        File.WriteAllText(configService.GetTemplateFilePath(slot, profile), "placeholder");
+                    }
+                }
+
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        perm_id = req.get('permId', '')\n" +
+                    "        sample_type = 'SUBSTANCE' if perm_id == 'PERM-MOL-1' else 'SUBSTRATE'\n" +
+                    "        resp = {'success': True, 'details': {'permId': perm_id, 'sampleType': sample_type, 'name': 'Test-' + perm_id}}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                var client = new OpenBisClient(tempRoot);
+                var capturingRenderer = new CapturingLabelPreviewRenderer(
+                    configService,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                using var backend = new LabelStudioBackend(
+                    configService,
+                    client,
+                    capturingRenderer,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                // 1. Molecule sample: FreeText must be stripped across ALL slots for RenderSlotWithFreeTextAsync and PrintSelectedLabelsAsync,
+                //    and a nonexistent Brother printer must be rejected cleanly without touching hardware.
+                SamplePreviewBundleDto molBundle = backend.LoadSamplePreviewsAsync(
+                    "SUBSTANCE",
+                    "PERM-MOL-1",
+                    "should-strip-magnet",
+                    "should-strip-flask").GetAwaiter().GetResult();
+                AssertTrue(molBundle.Success, $"Molecule LoadSamplePreviewsAsync failed: {molBundle.ErrorMessage}");
+                AssertEqual(LabelTemplateProfile.Molecule, molBundle.Profile, "Expected Molecule profile");
+
+                capturingRenderer.RenderedCalls.Clear();
+                backend.RenderSlotWithFreeTextAsync(LabelTemplateType.SmallBox12mm, "box-extra").GetAwaiter().GetResult();
+                backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "mag-extra").GetAwaiter().GetResult();
+                AssertEqual(2, capturingRenderer.RenderedCalls.Count, "Expected 2 captured RenderSlotWithFreeTextAsync calls");
+                AssertEqual("", capturingRenderer.RenderedCalls[0].FreeText, "SmallBox12mm FreeText must always be stripped");
+                AssertEqual("", capturingRenderer.RenderedCalls[1].FreeText, "Molecule Magnet12mm FreeText must be stripped");
+
+                LabelPrintBatchResult molPrintResult = backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.SmallBox12mm,
+                        PrinterName = "Brother PT-P700 (Missing Box)",
+                        FreeText = "strip-box"
+                    },
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Brother PT-P700 (Missing Magnet)",
+                        FreeText = "strip-magnet"
+                    },
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Flask24mm,
+                        PrinterName = "Brother PT-P700 (Missing Flask)",
+                        FreeText = "strip-flask"
+                    }
+                }).GetAwaiter().GetResult();
+
+                AssertEqual(LabelTemplateProfile.Molecule, capturingRenderer.LastPrintProfile, "Expected Molecule profile passed to PrintLabelsAsync");
+                AssertNotNull(capturingRenderer.LastPrintDetails, "Expected sample details passed to PrintLabelsAsync");
+                AssertEqual("PERM-MOL-1", capturingRenderer.LastPrintDetails!.PermId, "Expected PERM-MOL-1 details passed to PrintLabelsAsync");
+                AssertNotNull(capturingRenderer.LastPrintJobs, "Expected jobs passed to PrintLabelsAsync");
+                AssertEqual(3, capturingRenderer.LastPrintJobs!.Count, "Expected 3 print job requests");
+                foreach (LabelPrintJobRequest job in capturingRenderer.LastPrintJobs)
+                {
+                    AssertEqual("", job.FreeText, $"Molecule print job {job.Slot} must strip FreeText cleanly");
+                }
+
+                AssertFalse(molPrintResult.AllSucceeded, "Nonexistent printer must fail print batch safely");
+                AssertEqual(3, molPrintResult.Jobs.Count, "Expected 3 failed job results");
+                foreach (LabelPrintJobResult jobRes in molPrintResult.Jobs)
+                {
+                    AssertFalse(jobRes.Success, $"Job {jobRes.Slot} targeting missing printer must fail");
+                    AssertTrue(jobRes.Error.Contains("not installed", StringComparison.OrdinalIgnoreCase),
+                        $"Expected not-installed error for {jobRes.Slot}, actual: {jobRes.Error}");
+                }
+
+                // 2. Generic sample: SmallBox12mm must still strip FreeText in both RenderSlotWithFreeTextAsync and PrintSelectedLabelsAsync,
+                //    while Magnet12mm / Flask24mm keep FreeText.
+                SamplePreviewBundleDto genBundle = backend.LoadSamplePreviewsAsync(
+                    "SUBSTRATE",
+                    "PERM-GEN-1",
+                    "mag-init",
+                    "flask-init").GetAwaiter().GetResult();
+                AssertTrue(genBundle.Success, $"Generic LoadSamplePreviewsAsync failed: {genBundle.ErrorMessage}");
+                AssertEqual(LabelTemplateProfile.Generic, genBundle.Profile, "Expected Generic profile");
+
+                capturingRenderer.RenderedCalls.Clear();
+                backend.RenderSlotWithFreeTextAsync(LabelTemplateType.SmallBox12mm, "strip-box").GetAwaiter().GetResult();
+                backend.RenderSlotWithFreeTextAsync(LabelTemplateType.Magnet12mm, "keep-mag").GetAwaiter().GetResult();
+                AssertEqual("", capturingRenderer.RenderedCalls[0].FreeText, "Generic SmallBox12mm RenderSlotWithFreeTextAsync must strip FreeText");
+                AssertEqual("keep-mag", capturingRenderer.RenderedCalls[1].FreeText, "Generic Magnet12mm RenderSlotWithFreeTextAsync must keep FreeText");
+
+                LabelPrintBatchResult genPrintResult = backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.SmallBox12mm,
+                        PrinterName = "Brother PT-P700 (Missing)",
+                        FreeText = "strip-box"
+                    },
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Brother PT-P700 (Missing)",
+                        FreeText = "keep-mag"
+                    },
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Flask24mm,
+                        PrinterName = "Brother PT-P700 (Missing)",
+                        FreeText = "keep-flask"
+                    }
+                }).GetAwaiter().GetResult();
+
+                AssertFalse(genPrintResult.AllSucceeded, "Generic print batch targeting missing printer must fail safely");
+                AssertEqual("", capturingRenderer.LastPrintJobs![0].FreeText, "Generic SmallBox12mm print job must strip FreeText");
+                AssertEqual("keep-mag", capturingRenderer.LastPrintJobs[1].FreeText, "Generic Magnet12mm print job must preserve FreeText");
+                AssertEqual("keep-flask", capturingRenderer.LastPrintJobs[2].FreeText, "Generic Flask24mm print job must preserve FreeText");
+            });
+        }
+
+        private static void BackendSaveWizardStepRoundTripsPersistEachStepCleanly()
+        {
+            WithTempDir(tempRoot =>
+            {
+                using var backend = new LabelStudioBackend(
+                    tempRoot,
+                    installedPrintersProvider: () => new[] { "Brother PT-P700" });
+
+                AssertEqual(SetupWizardStep.Connection,
+                    backend.InitializeWorkspaceAsync().GetAwaiter().GetResult().MissingWizardStep,
+                    "Fresh directory must start at Connection wizard step");
+
+                // 1. Connection step success round-trip
+                OperationResult connRes = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.Connection,
+                    OpenBisUrl = "  https://openbis.example.org/openbis  ",
+                    Token = "  wizard-tok-123  "
+                }).GetAwaiter().GetResult();
+                AssertTrue(connRes.Success, $"Connection wizard save should succeed, error: {connRes.ErrorMessage}");
+
+                SettingsSnapshotDto afterConn = backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+                AssertEqual("https://openbis.example.org/openbis", afterConn.OpenBisUrl, "Connection wizard URL should trim and persist");
+                AssertEqual("wizard-tok-123", afterConn.Token, "Connection wizard Token should trim and persist");
+                AssertEqual(SetupWizardStep.ObjectTypes, afterConn.FirstMissingWizardStep, "Missing step after Connection should be ObjectTypes");
+
+                // 2. ObjectTypes step success round-trip (filters to IsSelected == true)
+                OperationResult typesRes = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.ObjectTypes,
+                    ObjectTypes = new[]
+                    {
+                        new ObjectTypeRowDto { IsSelected = false, Code = "SKIPPED", DisplayName = "Skipped", TemplateProfile = LabelTemplateProfile.Generic },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "CRYSTAL", DisplayName = "Lab Crystal", TemplateProfile = LabelTemplateProfile.Generic }
+                    }
+                }).GetAwaiter().GetResult();
+                AssertTrue(typesRes.Success, $"ObjectTypes wizard save should succeed, error: {typesRes.ErrorMessage}");
+
+                SettingsSnapshotDto afterTypes = backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+                AssertEqual(2, afterTypes.ConfiguredTypes.Count, "Only selected ObjectTypes must persist");
+                AssertEqual("CRYSTAL", afterTypes.ConfiguredTypes[0].Code, "Expected sorted CRYSTAL first");
+                AssertEqual(LabelTemplateProfile.Generic, afterTypes.ConfiguredTypes[0].TemplateProfile, "Expected CRYSTAL Generic profile");
+                AssertEqual("SUBSTANCE", afterTypes.ConfiguredTypes[1].Code, "Expected sorted SUBSTANCE second");
+                AssertEqual(LabelTemplateProfile.Molecule, afterTypes.ConfiguredTypes[1].TemplateProfile, "Expected SUBSTANCE Molecule profile");
+                AssertEqual(SetupWizardStep.Printers, afterTypes.FirstMissingWizardStep, "Missing step after ObjectTypes should be Printers");
+
+                // 3a. Printers step success round-trip with ObjectTypes == null preserves saved ObjectTypes
+                OperationResult printersOnlyRes = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.Printers,
+                    ObjectTypes = null,
+                    SmallBoxPrinter = "  Brother PT-P700 (Box) ",
+                    MagnetPrinter = " Brother PT-P700 (Mag) ",
+                    FlaskPrinter = " Brother PT-P700 (Flask) "
+                }).GetAwaiter().GetResult();
+                AssertTrue(printersOnlyRes.Success, $"Printers-only wizard save should succeed, error: {printersOnlyRes.ErrorMessage}");
+
+                WorkspaceStartupState ready = backend.InitializeWorkspaceAsync().GetAwaiter().GetResult();
+                AssertEqual(SetupWizardStep.None, ready.MissingWizardStep, "All wizard steps complete should report SetupWizardStep.None");
+                AssertEqual(2, ready.ConfiguredTypes.Count, "Printers step with ObjectTypes == null must preserve existing types");
+
+                var verifyService = new AppConfigService(tempRoot);
+                PrinterConfig? savedPrinters = verifyService.LoadPrinterConfig();
+                AssertNotNull(savedPrinters, "Saved PrinterConfig should exist");
+                AssertEqual("Brother PT-P700 (Box)", savedPrinters!.SmallBoxPrinter, "Saved SmallBoxPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Mag)", savedPrinters.MagnetPrinter, "Saved MagnetPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Flask)", savedPrinters.FlaskPrinter, "Saved FlaskPrinter mismatch");
+
+                // 3b. Printers step with updated ObjectTypes and blank printer normalizes defaults and updates both configs
+                OperationResult printersWithTypesRes = backend.SaveWizardStepAsync(new WizardStepSaveRequest
+                {
+                    Step = SetupWizardStep.Printers,
+                    ObjectTypes = new[]
+                    {
+                        new ObjectTypeRowDto { IsSelected = true, Code = "WAFER", DisplayName = "Silicon Wafer", TemplateProfile = LabelTemplateProfile.Generic }
+                    },
+                    SmallBoxPrinter = "Brother PT-P700 (Custom)",
+                    MagnetPrinter = "",
+                    FlaskPrinter = "   "
+                }).GetAwaiter().GetResult();
+                AssertTrue(printersWithTypesRes.Success, $"Printers+ObjectTypes wizard save should succeed, error: {printersWithTypesRes.ErrorMessage}");
+
+                SettingsSnapshotDto finalSnapshot = backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+                AssertEqual(1, finalSnapshot.ConfiguredTypes.Count, "Expected updated single WAFER type");
+                AssertEqual("WAFER", finalSnapshot.ConfiguredTypes[0].Code, "Expected WAFER code");
+                PrinterConfig? normalizedPrinters = verifyService.LoadPrinterConfig();
+                AssertNotNull(normalizedPrinters, "Normalized PrinterConfig should exist");
+                AssertEqual("Brother PT-P700 (Custom)", normalizedPrinters!.SmallBoxPrinter, "Custom SmallBoxPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Kopie 1)", normalizedPrinters.MagnetPrinter, "Blank MagnetPrinter should normalize to default");
+                AssertEqual("Brother PT-P700 (Kopie 2)", normalizedPrinters.FlaskPrinter, "Blank FlaskPrinter should normalize to default");
+            });
         }
 
         private static void FrontendFormsContainNoBackendServiceOrSecretReferences()

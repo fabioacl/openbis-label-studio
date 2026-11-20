@@ -35,6 +35,8 @@ namespace OpenBISLabelStudio
         private bool _isPopulatingTypes;
         private readonly Dictionary<LabelTemplateType, long> _slotRenderVersions = new Dictionary<LabelTemplateType, long>();
         private readonly Dictionary<LabelTemplateType, CancellationTokenSource> _slotPreviewCts = new Dictionary<LabelTemplateType, CancellationTokenSource>();
+        private CancellationTokenSource? _typeRefreshCts;
+        private CancellationTokenSource? _typeSelectionCts;
         private CancellationTokenSource? _sampleLoadPreviewCts;
         private long _typeRefreshRequestVersion;
         private long _typeSelectionRequestVersion;
@@ -123,6 +125,8 @@ namespace OpenBISLabelStudio
 
         partial void DisposeManagedResources()
         {
+            CancelPendingTypeRefresh();
+            CancelPendingTypeSelection();
             CancelPendingSampleLoad();
             CancelAllSlotPreviewRenders();
             SetPictureBoxImage(smallBoxLabelPreview, null);
@@ -368,33 +372,50 @@ namespace OpenBISLabelStudio
         private async Task RefreshWorkspaceTypesAsync()
         {
             long requestVersion = ++_typeRefreshRequestVersion;
+            CancelPendingTypeRefresh();
 
-            BackgroundTypeRefreshResult refresh = await _backend.RefreshWorkspaceTypesAsync(_recoveryPrompter);
-            if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
-            {
-                return;
-            }
+            var cts = new CancellationTokenSource();
+            _typeRefreshCts = cts;
+            CancellationToken ct = cts.Token;
 
-            if (refresh.Skipped)
+            try
             {
-                return;
-            }
-
-            if (!refresh.Success)
-            {
-                if (!string.IsNullOrWhiteSpace(refresh.NoticeMessage))
+                BackgroundTypeRefreshResult refresh = await _backend.RefreshWorkspaceTypesAsync(_recoveryPrompter, ct);
+                if (IsDisposed || Disposing || ct.IsCancellationRequested || requestVersion != _typeRefreshRequestVersion)
                 {
-                    ShowStatusNotice(refresh.NoticeMessage, refresh.NoticeTooltip);
+                    return;
                 }
 
-                return;
-            }
+                if (refresh.Skipped)
+                {
+                    return;
+                }
 
-            ClearStatusNotice();
-            if (refresh.TypesUpdated)
+                if (!refresh.Success)
+                {
+                    if (!string.IsNullOrWhiteSpace(refresh.NoticeMessage))
+                    {
+                        ShowStatusNotice(refresh.NoticeMessage, refresh.NoticeTooltip);
+                    }
+
+                    return;
+                }
+
+                ClearStatusNotice();
+                if (refresh.TypesUpdated)
+                {
+                    PopulateOpenBisTypeComboBox(refresh.ConfiguredTypes, _currentSelectedTypeCode);
+                    UpdateFreeTextControlsState();
+                }
+            }
+            catch (OperationCanceledException)
             {
-                PopulateOpenBisTypeComboBox(refresh.ConfiguredTypes, _currentSelectedTypeCode);
-                UpdateFreeTextControlsState();
+                // Ignored when a newer refresh, Settings dialog, or form disposal cancels this request.
+            }
+            finally
+            {
+                Interlocked.CompareExchange(ref _typeRefreshCts, null, cts);
+                cts.Dispose();
             }
         }
 
@@ -430,6 +451,7 @@ namespace OpenBISLabelStudio
             {
                 ++_typeSelectionRequestVersion;
                 ++_sampleDetailsRequestVersion;
+                CancelPendingTypeSelection();
                 CancelPendingSampleLoad();
                 SetSampleQueryControlsEnabled(true);
                 selectedOpenbisTypeLabel.Text = "Type:";
@@ -449,7 +471,12 @@ namespace OpenBISLabelStudio
 
             long requestVersion = ++_typeSelectionRequestVersion;
             ++_sampleDetailsRequestVersion;
+            CancelPendingTypeSelection();
             CancelPendingSampleLoad();
+
+            var cts = new CancellationTokenSource();
+            _typeSelectionCts = cts;
+            CancellationToken ct = cts.Token;
 
             _currentSelectedTypeCode = selectedItem.Code;
             _activeProfile = selectedItem.TemplateProfile;
@@ -470,8 +497,8 @@ namespace OpenBISLabelStudio
 
             try
             {
-                SampleListResultDto result = await _backend.LoadObjectsForTypeAsync(selectedItem.Code, _recoveryPrompter);
-                if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
+                SampleListResultDto result = await _backend.LoadObjectsForTypeAsync(selectedItem.Code, _recoveryPrompter, ct);
+                if (IsDisposed || Disposing || ct.IsCancellationRequested || requestVersion != _typeSelectionRequestVersion)
                 {
                     return;
                 }
@@ -525,8 +552,15 @@ namespace OpenBISLabelStudio
                         MessageBoxIcon.Error);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                // Ignored when a newer type selection, placeholder reset, Settings dialog, or form disposal cancels this request.
+            }
             finally
             {
+                Interlocked.CompareExchange(ref _typeSelectionCts, null, cts);
+                cts.Dispose();
+
                 if (!IsDisposed && !Disposing && requestVersion == _typeSelectionRequestVersion)
                 {
                     ClearLoadingFeedback();
@@ -605,7 +639,7 @@ namespace OpenBISLabelStudio
                     recoveryPrompter: _recoveryPrompter,
                     ct: ct);
 
-                if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
+                if (IsDisposed || Disposing || ct.IsCancellationRequested || requestVersion != _sampleDetailsRequestVersion)
                 {
                     return;
                 }
@@ -674,11 +708,7 @@ namespace OpenBISLabelStudio
             }
             finally
             {
-                if (ReferenceEquals(_sampleLoadPreviewCts, cts))
-                {
-                    _sampleLoadPreviewCts = null;
-                }
-
+                Interlocked.CompareExchange(ref _sampleLoadPreviewCts, null, cts);
                 cts.Dispose();
 
                 if (!IsDisposed && !Disposing && requestVersion == _sampleDetailsRequestVersion)
@@ -803,7 +833,11 @@ namespace OpenBISLabelStudio
             CancelSlotPreviewRender(slot);
 
             var cts = new CancellationTokenSource();
-            _slotPreviewCts[slot] = cts;
+            lock (_slotPreviewCts)
+            {
+                _slotPreviewCts[slot] = cts;
+            }
+
             CancellationToken cancellationToken = cts.Token;
             LabelTemplateProfile profile = _activeProfile;
 
@@ -836,9 +870,12 @@ namespace OpenBISLabelStudio
             }
             finally
             {
-                if (_slotPreviewCts.TryGetValue(slot, out CancellationTokenSource? tracked) && ReferenceEquals(tracked, cts))
+                lock (_slotPreviewCts)
                 {
-                    _slotPreviewCts.Remove(slot);
+                    if (_slotPreviewCts.TryGetValue(slot, out CancellationTokenSource? tracked) && ReferenceEquals(tracked, cts))
+                    {
+                        _slotPreviewCts.Remove(slot);
+                    }
                 }
 
                 cts.Dispose();
@@ -875,41 +912,55 @@ namespace OpenBISLabelStudio
             return _slotRenderVersions.TryGetValue(slot, out long activeVersion) && activeVersion == expectedVersion;
         }
 
-        private void CancelPendingSampleLoad()
+        private bool CancelPendingTypeRefresh()
         {
-            if (_sampleLoadPreviewCts == null)
+            return CancelTokenSourceSafe(Interlocked.Exchange(ref _typeRefreshCts, null));
+        }
+
+        private bool CancelPendingTypeSelection()
+        {
+            return CancelTokenSourceSafe(Interlocked.Exchange(ref _typeSelectionCts, null));
+        }
+
+        private bool CancelPendingSampleLoad()
+        {
+            return CancelTokenSourceSafe(Interlocked.Exchange(ref _sampleLoadPreviewCts, null));
+        }
+
+        private static bool CancelTokenSourceSafe(CancellationTokenSource? cts)
+        {
+            if (cts == null)
             {
-                return;
+                return false;
             }
 
             try
             {
-                _sampleLoadPreviewCts.Cancel();
+                cts.Cancel();
             }
             catch
             {
                 // Ignore cancellation failure during disposal.
             }
+
+            return true;
         }
 
         private void CancelSlotPreviewRender(LabelTemplateType slot)
         {
-            if (!_slotPreviewCts.TryGetValue(slot, out CancellationTokenSource? existing))
+            CancellationTokenSource? existing;
+            lock (_slotPreviewCts)
             {
-                return;
+                if (!_slotPreviewCts.TryGetValue(slot, out existing))
+                {
+                    return;
+                }
+
+                _slotPreviewCts.Remove(slot);
             }
 
-            _slotPreviewCts.Remove(slot);
-            try
-            {
-                existing.Cancel();
-            }
-            catch
-            {
-                // Ignore cancellation failure during disposal.
-            }
-
-            existing.Dispose();
+            // Defer Dispose() to RenderSlotFreeTextPreviewAsync's finally block while renderers still hold the token.
+            CancelTokenSourceSafe(existing);
         }
 
         private void CancelAllSlotPreviewRenders()
@@ -1132,8 +1183,25 @@ namespace OpenBISLabelStudio
 
         private async void btnSettings_Click(object? sender, EventArgs e)
         {
-            // Cancel any in-flight startup type refresh so it cannot open recovery UI over Settings or apply stale data.
+            // Cancel any in-flight startup type refresh, type selection, or sample load so none
+            // can open recovery UI over Settings or apply stale results.
             ++_typeRefreshRequestVersion;
+            ++_typeSelectionRequestVersion;
+            ++_sampleDetailsRequestVersion;
+            CancelPendingTypeRefresh();
+            bool cancelledTypeSelection = CancelPendingTypeSelection();
+            bool cancelledSampleLoad = CancelPendingSampleLoad();
+
+            if (cancelledSampleLoad)
+            {
+                ClearSlotPreviewImages();
+            }
+
+            if (cancelledTypeSelection || cancelledSampleLoad)
+            {
+                ClearLoadingFeedback();
+                SetSampleQueryControlsEnabled(true);
+            }
 
             string previousFingerprint = _credentialFingerprint;
             string previousTypeCode = _currentSelectedTypeCode;
@@ -1169,6 +1237,7 @@ namespace OpenBISLabelStudio
             {
                 ++_typeSelectionRequestVersion;
                 ++_sampleDetailsRequestVersion;
+                CancelPendingTypeSelection();
                 CancelPendingSampleLoad();
                 PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode: null);
                 openbisObjectsComboBox.Items.Clear();

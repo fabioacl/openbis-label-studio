@@ -152,7 +152,7 @@ namespace OpenBISLabelStudio.Services
         /// Reads worker-generated PNG bytes directly when available and disposes temporary GDI+ bitmaps
         /// on fallback or in-process STA renders.
         /// </summary>
-        public async Task<byte[]> RenderTemplatePreviewPngAsync(
+        public virtual async Task<byte[]> RenderTemplatePreviewPngAsync(
             LabelTemplateType slot,
             LabelTemplateProfile profile,
             SampleDetailsDto details,
@@ -243,7 +243,7 @@ namespace OpenBISLabelStudio.Services
         /// <summary>
         /// Prints one or more label slots directly to their configured printers off the UI thread.
         /// </summary>
-        public async Task<LabelPrintBatchResult> PrintLabelsAsync(
+        public virtual async Task<LabelPrintBatchResult> PrintLabelsAsync(
             LabelTemplateProfile profile,
             SampleDetailsDto details,
             IReadOnlyList<LabelPrintJobRequest> jobs,

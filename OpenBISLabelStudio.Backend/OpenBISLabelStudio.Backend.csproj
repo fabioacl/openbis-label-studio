@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
     <COMReference Include="bpac">
       <WrapperTool>tlbimp</WrapperTool>
       <VersionMinor>3</VersionMinor>
