@@ -67,6 +67,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters), BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters),
                 (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
                 (nameof(BackendFiltersOutManagedInternallyTypesInBuildAndServerSync), BackendFiltersOutManagedInternallyTypesInBuildAndServerSync),
+                (nameof(AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms), AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -4233,6 +4234,57 @@ namespace OpenBISLabelStudio.Tests
                     bgRefresh.ConfiguredTypes.First(t => t.Code == "$STORAGE").DisplayText,
                     "MergeServerTypeDescriptions must ignore ManagedInternally server types");
             });
+        }
+
+        private static void AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms()
+        {
+            using Icon? loaded = AppIconProvider.TryCreateWindowIcon();
+            AssertNotNull(loaded, "Expected AppIconProvider.TryCreateWindowIcon() to return embedded icon");
+            AssertTrue(loaded!.Width > 0 && loaded.Height > 0, "Window icon dimensions must be positive");
+
+            using var icon16 = new Icon(loaded, 16, 16);
+            using var icon32 = new Icon(loaded, 32, 32);
+            AssertTrue(icon16.Width > 0 && icon32.Width > 0, "Resized 16px and 32px icon frames must be valid");
+
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            var stub = new StubLabelStudioBackend(validPng);
+            for (int i = 0; i < 2; i++)
+            {
+                var mainForm = new Form1(stub);
+                Icon? form1Icon = mainForm.Icon;
+                AssertNotNull(form1Icon, "Form1 must receive a non-null custom window icon");
+                AssertFalse(ReferenceEquals(SystemIcons.Application, form1Icon), "Form1 icon must not remain generic system icon");
+                mainForm.Dispose();
+                AssertFalse(ReferenceEquals(form1Icon, mainForm.Icon), "Form1.Dispose() must detach owned Icon cleanly");
+                bool mainDisposed = false;
+                try { _ = form1Icon!.Handle; } catch (ObjectDisposedException) { mainDisposed = true; }
+                AssertTrue(mainDisposed, "Form1.Dispose() must dispose owned Icon handle");
+
+                var settingsForm = new SetupSettingsForm(stub, SetupDialogMode.Settings);
+                Icon? settingsIcon = settingsForm.Icon;
+                AssertNotNull(settingsIcon, "SetupSettingsForm must receive a non-null custom window icon");
+                AssertFalse(ReferenceEquals(SystemIcons.Application, settingsIcon), "SetupSettingsForm icon must not remain generic system icon");
+                settingsForm.Dispose();
+                AssertFalse(ReferenceEquals(settingsIcon, settingsForm.Icon), "SetupSettingsForm.Dispose() must detach owned Icon cleanly");
+                bool settingsDisposed = false;
+                try { _ = settingsIcon!.Handle; } catch (ObjectDisposedException) { settingsDisposed = true; }
+                AssertTrue(settingsDisposed, "SetupSettingsForm.Dispose() must dispose owned Icon handle");
+            }
+
+            string? exePath = Path.ChangeExtension(typeof(Form1).Assembly.Location, ".exe");
+            if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath))
+            {
+                using Icon? exeIcon = Icon.ExtractAssociatedIcon(exePath);
+                AssertNotNull(exeIcon, $"Expected embedded Win32 application icon on '{exePath}'");
+                AssertTrue(exeIcon!.Width > 0 && exeIcon.Height > 0, "Executable icon dimensions must be positive");
+            }
         }
 
         private static void ShowOffscreen(Form form)
