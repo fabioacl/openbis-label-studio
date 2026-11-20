@@ -1,16 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Printing;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using OpenBISLabelStudio.Backend.Contracts;
+using OpenBISLabelStudio.Models;
 
 namespace OpenBISLabelStudio
 {
-    using OpenBISLabelStudio.Services;
-
     /// <summary>
     /// Selects the operating mode of <see cref="SetupSettingsForm"/>.
     /// </summary>
@@ -30,22 +29,19 @@ namespace OpenBISLabelStudio
         private const string StyleMoleculeDisplay = "Molecule / Substance";
         private const string StyleGenericDisplay = "Generic / Free-text";
 
-        private readonly AppConfigService _configService;
-        private readonly OpenBisClient _openBisClient;
-        private readonly LabelPreviewRenderer _previewRenderer;
-        private readonly Func<IReadOnlyList<string>>? _installedPrintersProvider;
+        private readonly ILabelStudioBackend _backend;
         private readonly string? _initialWarning;
 
-        private readonly List<TypeRowEntry> _masterTypeRows = new List<TypeRowEntry>();
-        private readonly Dictionary<(Models.LabelTemplateProfile Profile, Models.LabelTemplateType Slot), Image> _previewCache
-            = new Dictionary<(Models.LabelTemplateProfile Profile, Models.LabelTemplateType Slot), Image>();
+        private readonly List<ObjectTypeRowDto> _masterTypeRows = new List<ObjectTypeRowDto>();
+        private readonly Dictionary<(LabelTemplateProfile Profile, LabelTemplateType Slot), byte[]> _previewPngCache
+            = new Dictionary<(LabelTemplateProfile Profile, LabelTemplateType Slot), byte[]>();
         private readonly Font _tabRegularFont = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
         private readonly Font _tabBoldFont = new Font("Segoe UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
         private readonly Font _previewRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         private readonly Font _previewBoldFont = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point);
 
-        private Models.SetupWizardStep _currentStep;
-        private Models.LabelTemplateProfile _activePreviewProfile = Models.LabelTemplateProfile.Molecule;
+        private SetupWizardStep _currentStep;
+        private LabelTemplateProfile _activePreviewProfile = LabelTemplateProfile.Molecule;
         private CancellationTokenSource? _previewRenderCts;
         private long _previewRenderVersion;
         private long _typesFetchVersion;
@@ -57,38 +53,28 @@ namespace OpenBISLabelStudio
         private bool _hasStartedPage2Previews;
         private bool _cameFromPrintersStep;
         private bool _autoFetchAttemptedForCurrentInputs;
+        private bool _hasValidConfiguredTypes;
+        private bool _hasPrinterConfig;
         private bool _resourcesDisposed;
         private bool _fontsDisposed;
         private string _validatedUrl = "";
         private string _validatedToken = "";
-
-        private sealed class TypeRowEntry
-        {
-            public bool IsSelected { get; set; }
-            public string Code { get; set; } = "";
-            public string DisplayName { get; set; } = "";
-            public Models.LabelTemplateProfile TemplateProfile { get; set; } = Models.LabelTemplateProfile.Generic;
-            public string DisplayLabel => $"{DisplayName} ({Code})";
-        }
+        private string _fallbackSmallBoxPrinter = "Brother PT-P700";
+        private string _fallbackMagnetPrinter = "Brother PT-P700 (Kopie 1)";
+        private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
 
         /// <summary>
         /// Initializes the unified setup and settings dialog for the specified <paramref name="mode"/>.
         /// </summary>
         public SetupSettingsForm(
-            AppConfigService configService,
-            OpenBisClient openBisClient,
-            LabelPreviewRenderer previewRenderer,
+            ILabelStudioBackend backend,
             SetupDialogMode mode,
-            Models.SetupWizardStep startStep = Models.SetupWizardStep.Connection,
-            string? initialWarning = null,
-            Func<IReadOnlyList<string>>? installedPrintersProvider = null)
+            SetupWizardStep startStep = SetupWizardStep.Connection,
+            string? initialWarning = null)
         {
-            _configService = configService ?? throw new ArgumentNullException(nameof(configService));
-            _openBisClient = openBisClient ?? throw new ArgumentNullException(nameof(openBisClient));
-            _previewRenderer = previewRenderer ?? throw new ArgumentNullException(nameof(previewRenderer));
+            _backend = backend ?? throw new ArgumentNullException(nameof(backend));
             Mode = mode;
             _initialWarning = initialWarning;
-            _installedPrintersProvider = installedPrintersProvider;
 
             InitializeComponent();
             InitializeFromConfig(startStep);
@@ -100,158 +86,47 @@ namespace OpenBISLabelStudio
         public SetupDialogMode Mode { get; }
 
         /// <summary>
-        /// Gets the most recently fetched list of openBIS server object types, if any.
+        /// Gets whether server object types were synced or pre-seeded during this dialog session.
         /// </summary>
-        public IReadOnlyList<Models.OpenBisTypeInfoDto>? CachedServerTypes { get; private set; }
+        public bool TypesSyncedFromServer { get; private set; }
 
         /// <summary>
-        /// Merges server-discovered object types with existing saved mappings.
-        /// Unconfigured <c>SUBSTANCE</c> defaults to <see cref="Models.LabelTemplateProfile.Molecule"/>;
-        /// all other unconfigured types default to <see cref="Models.LabelTemplateProfile.Generic"/>.
+        /// Replaces the Object Types grid with <paramref name="rows"/> while preserving selection and scroll state.
         /// </summary>
-        public static List<Models.ConfiguredOpenBisType> BuildInitialTypeRows(
-            IEnumerable<Models.OpenBisTypeInfoDto> serverTypes,
-            IReadOnlyList<Models.ConfiguredOpenBisType> existingConfigured)
+        public void ApplyTypeRows(IReadOnlyList<ObjectTypeRowDto> rows, bool syncedFromServer = true)
         {
-            ArgumentNullException.ThrowIfNull(serverTypes);
-            ArgumentNullException.ThrowIfNull(existingConfigured);
-
-            var existingByCode = new Dictionary<string, Models.ConfiguredOpenBisType>(StringComparer.OrdinalIgnoreCase);
-            foreach (Models.ConfiguredOpenBisType existing in existingConfigured)
-            {
-                if (existing == null || string.IsNullOrWhiteSpace(existing.Code))
-                {
-                    continue;
-                }
-
-                string code = existing.Code.Trim();
-                if (!existingByCode.ContainsKey(code))
-                {
-                    existingByCode[code] = existing;
-                }
-            }
-
-            var result = new List<Models.ConfiguredOpenBisType>();
-            var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (Models.OpenBisTypeInfoDto serverType in serverTypes)
-            {
-                if (serverType == null || string.IsNullOrWhiteSpace(serverType.Code))
-                {
-                    continue;
-                }
-
-                string code = serverType.Code.Trim();
-                if (!seenCodes.Add(code))
-                {
-                    continue;
-                }
-
-                existingByCode.TryGetValue(code, out Models.ConfiguredOpenBisType? existing);
-
-                string displayName = !string.IsNullOrWhiteSpace(serverType.Description)
-                    ? serverType.Description.Trim()
-                    : (!string.IsNullOrWhiteSpace(existing?.DisplayName)
-                        ? existing.DisplayName.Trim()
-                        : AppConfigService.FormatFriendlyName(code));
-
-                Models.LabelTemplateProfile profile = existing != null && Enum.IsDefined(typeof(Models.LabelTemplateProfile), existing.TemplateProfile)
-                    ? existing.TemplateProfile
-                    : GetDefaultProfileForCode(code);
-
-                result.Add(new Models.ConfiguredOpenBisType
-                {
-                    Code = code,
-                    DisplayName = displayName,
-                    TemplateProfile = profile
-                });
-            }
-
-            // Preserve any saved/existing entries absent from serverTypes (including offline fallback).
-            foreach (Models.ConfiguredOpenBisType existing in existingConfigured)
-            {
-                if (existing == null || string.IsNullOrWhiteSpace(existing.Code))
-                {
-                    continue;
-                }
-
-                string code = existing.Code.Trim();
-                if (!seenCodes.Add(code))
-                {
-                    continue;
-                }
-
-                Models.LabelTemplateProfile profile = Enum.IsDefined(typeof(Models.LabelTemplateProfile), existing.TemplateProfile)
-                    ? existing.TemplateProfile
-                    : GetDefaultProfileForCode(code);
-
-                result.Add(new Models.ConfiguredOpenBisType
-                {
-                    Code = code,
-                    DisplayName = string.IsNullOrWhiteSpace(existing.DisplayName)
-                        ? AppConfigService.FormatFriendlyName(code)
-                        : existing.DisplayName.Trim(),
-                    TemplateProfile = profile
-                });
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// Replaces/merges the Object Types grid with <paramref name="serverTypes"/> while
-        /// preserving checked state and template profiles for already-known entries.
-        /// </summary>
-        public void ApplyServerTypes(IEnumerable<Models.OpenBisTypeInfoDto> serverTypes)
-        {
-            ArgumentNullException.ThrowIfNull(serverTypes);
+            ArgumentNullException.ThrowIfNull(rows);
 
             CommitGridEdits();
             SyncVisibleGridToMaster();
 
-            var validServerTypes = serverTypes
-                .Where(t => t != null && !string.IsNullOrWhiteSpace(t.Code))
-                .Select(t => new Models.OpenBisTypeInfoDto
-                {
-                    Code = t.Code.Trim(),
-                    Description = t.Description?.Trim() ?? ""
-                })
-                .ToList();
+            TypesSyncedFromServer = syncedFromServer;
 
-            CachedServerTypes = validServerTypes.AsReadOnly();
-
-            var checkedCodes = new HashSet<string>(
-                _masterTypeRows.Where(r => r.IsSelected).Select(r => r.Code),
-                StringComparer.OrdinalIgnoreCase);
-
-            List<Models.ConfiguredOpenBisType> existingSnapshot = _masterTypeRows
-                .Select(r => new Models.ConfiguredOpenBisType
-                {
-                    Code = r.Code,
-                    DisplayName = r.DisplayName,
-                    TemplateProfile = r.TemplateProfile
-                })
-                .ToList();
-
-            List<Models.ConfiguredOpenBisType> merged = BuildInitialTypeRows(validServerTypes, existingSnapshot);
-
-            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as TypeRowEntry)?.Code;
+            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as ObjectTypeRowDto)?.Code;
             int firstDisplayedRow = dgvObjectTypes.FirstDisplayedScrollingRowIndex;
 
             _masterTypeRows.Clear();
-            foreach (Models.ConfiguredOpenBisType item in merged)
+            foreach (ObjectTypeRowDto row in rows)
             {
-                _masterTypeRows.Add(new TypeRowEntry
+                if (row == null || string.IsNullOrWhiteSpace(row.Code))
                 {
-                    IsSelected = checkedCodes.Contains(item.Code),
-                    Code = item.Code,
-                    DisplayName = item.DisplayName,
-                    TemplateProfile = item.TemplateProfile
+                    continue;
+                }
+
+                string cleanCode = row.Code.Trim();
+                _masterTypeRows.Add(new ObjectTypeRowDto
+                {
+                    IsSelected = row.IsSelected,
+                    Code = cleanCode,
+                    DisplayName = string.IsNullOrWhiteSpace(row.DisplayName) ? cleanCode : row.DisplayName.Trim(),
+                    TemplateProfile = Enum.IsDefined(typeof(LabelTemplateProfile), row.TemplateProfile)
+                        ? row.TemplateProfile
+                        : GetDefaultProfileForCode(cleanCode)
                 });
             }
 
             RefreshObjectTypeGrid(selectedRowCode, firstDisplayedRow);
-            if (_currentStep == Models.SetupWizardStep.ObjectTypes && IsHandleCreated)
+            if (_currentStep == SetupWizardStep.ObjectTypes && IsHandleCreated)
             {
                 if (!_hasStartedPage2Previews)
                 {
@@ -266,46 +141,36 @@ namespace OpenBISLabelStudio
         }
 
         /// <summary>
-        /// Validates local settings constraints and atomically writes all three configuration
-        /// files under <c>config/</c> without invoking openBIS or requiring network access.
+        /// Validates local settings constraints and atomically writes all configuration
+        /// files via the backend without requiring openBIS network access.
         /// </summary>
         public bool TrySaveSettingsOffline(out string validationError)
         {
             CommitGridEdits();
             SyncVisibleGridToMaster();
 
-            if (!ValidateConnectionInputs(out string url, out string token, out validationError))
+            OperationResult result = _backend.SaveSettingsOfflineAsync(new SettingsSaveRequest
             {
-                return false;
-            }
+                OpenBisUrl = (txtInstanceUrl.Text ?? "").Trim(),
+                Token = (txtToken.Text ?? "").Trim(),
+                ObjectTypes = GetMasterTypeRowsSnapshot(),
+                SmallBoxPrinter = GetSelectedPrinterName(cmbSmallBoxPrinter, _fallbackSmallBoxPrinter),
+                MagnetPrinter = GetSelectedPrinterName(cmbMagnetPrinter, _fallbackMagnetPrinter),
+                FlaskPrinter = GetSelectedPrinterName(cmbFlaskPrinter, _fallbackFlaskPrinter)
+            }).GetAwaiter().GetResult();
 
-            List<Models.ConfiguredOpenBisType> selectedTypes = GetSelectedConfiguredTypes();
-            if (selectedTypes.Count == 0)
-            {
-                validationError = "Select at least one object type.";
-                return false;
-            }
-
-            Models.PrinterConfig printerConfig = BuildPrinterConfigFromSelections();
-
-            return TryPersistConfig(() =>
-            {
-                _configService.SaveAppConfig(new Models.AppConfig
-                {
-                    OpenBisUrl = url,
-                    Token = token
-                });
-                _configService.SaveConfiguredTypes(selectedTypes);
-                _configService.SavePrinterConfig(printerConfig);
-            }, out validationError);
+            validationError = result.Success
+                ? ""
+                : (string.IsNullOrWhiteSpace(result.ErrorMessage) ? "Could not save configuration files." : result.ErrorMessage);
+            return result.Success;
         }
 
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
-            _previewRenderer.WarmUpWorkerInBackground();
+            _backend.WarmUpInBackground();
 
-            if (_currentStep == Models.SetupWizardStep.ObjectTypes && !_hasStartedPage2Previews)
+            if (_currentStep == SetupWizardStep.ObjectTypes && !_hasStartedPage2Previews)
             {
                 ShowExamplePreviews(_activePreviewProfile);
             }
@@ -322,14 +187,14 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            if (_currentStep == Models.SetupWizardStep.ObjectTypes)
+            if (_currentStep == SetupWizardStep.ObjectTypes)
             {
                 if (!_hasStartedPage2Previews)
                 {
                     ShowExamplePreviews(_activePreviewProfile);
                 }
 
-                if (CachedServerTypes == null && !_autoFetchAttemptedForCurrentInputs)
+                if (!TypesSyncedFromServer && !_autoFetchAttemptedForCurrentInputs)
                 {
                     _ = LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
                 }
@@ -350,12 +215,7 @@ namespace OpenBISLabelStudio
             AssignPreviewPictureBoxImage(picPreviewMagnet, null);
             AssignPreviewPictureBoxImage(picPreviewFlask, null);
 
-            foreach (Image image in _previewCache.Values)
-            {
-                image.Dispose();
-            }
-
-            _previewCache.Clear();
+            _previewPngCache.Clear();
         }
 
         partial void DisposeOwnedFonts()
@@ -372,53 +232,52 @@ namespace OpenBISLabelStudio
             _previewBoldFont.Dispose();
         }
 
-        private void InitializeFromConfig(Models.SetupWizardStep requestedStartStep)
+        private void InitializeFromConfig(SetupWizardStep requestedStartStep)
         {
-            Models.AppConfig? savedApp = _configService.LoadAppConfig();
-            List<Models.ConfiguredOpenBisType> savedTypes = _configService.LoadConfiguredTypes();
-            Models.PrinterConfig? savedPrinters = _configService.LoadPrinterConfig();
+            SettingsSnapshotDto snapshot = _backend.GetSettingsSnapshotAsync().GetAwaiter().GetResult();
+            _hasValidConfiguredTypes = snapshot.HasValidConfiguredTypes;
+            _hasPrinterConfig = snapshot.HasPrinterConfig;
 
             _isInitializingInputs = true;
             try
             {
-                txtInstanceUrl.Text = savedApp?.OpenBisUrl ?? "";
+                txtInstanceUrl.Text = snapshot.OpenBisUrl ?? "";
                 txtToken.Text = Mode == SetupDialogMode.ExpiredTokenRecovery
                     ? ""
-                    : (savedApp?.Token ?? "");
+                    : (snapshot.Token ?? "");
 
                 _masterTypeRows.Clear();
-                foreach (Models.ConfiguredOpenBisType savedType in savedTypes)
+                foreach (ObjectTypeRowDto savedType in snapshot.ConfiguredTypes)
                 {
-                    if (string.IsNullOrWhiteSpace(savedType.Code))
+                    if (savedType == null || string.IsNullOrWhiteSpace(savedType.Code))
                     {
                         continue;
                     }
 
-                    _masterTypeRows.Add(new TypeRowEntry
+                    string cleanCode = savedType.Code.Trim();
+                    _masterTypeRows.Add(new ObjectTypeRowDto
                     {
-                        IsSelected = true,
-                        Code = savedType.Code.Trim(),
-                        DisplayName = string.IsNullOrWhiteSpace(savedType.DisplayName)
-                            ? AppConfigService.FormatFriendlyName(savedType.Code)
-                            : savedType.DisplayName.Trim(),
-                        TemplateProfile = Enum.IsDefined(typeof(Models.LabelTemplateProfile), savedType.TemplateProfile)
+                        IsSelected = savedType.IsSelected,
+                        Code = cleanCode,
+                        DisplayName = string.IsNullOrWhiteSpace(savedType.DisplayName) ? cleanCode : savedType.DisplayName.Trim(),
+                        TemplateProfile = Enum.IsDefined(typeof(LabelTemplateProfile), savedType.TemplateProfile)
                             ? savedType.TemplateProfile
-                            : GetDefaultProfileForCode(savedType.Code)
+                            : GetDefaultProfileForCode(cleanCode)
                     });
                 }
 
                 RefreshObjectTypeGrid();
-                PopulatePrinterCombos(savedPrinters);
+                PopulatePrinterCombos(snapshot.Printers);
             }
             finally
             {
                 _isInitializingInputs = false;
             }
 
-            Models.SetupWizardStep initialStep = Mode == SetupDialogMode.ExpiredTokenRecovery
-                ? Models.SetupWizardStep.Connection
-                : (requestedStartStep == Models.SetupWizardStep.None
-                    ? Models.SetupWizardStep.Connection
+            SetupWizardStep initialStep = Mode == SetupDialogMode.ExpiredTokenRecovery
+                ? SetupWizardStep.Connection
+                : (requestedStartStep == SetupWizardStep.None
+                    ? SetupWizardStep.Connection
                     : requestedStartStep);
 
             ApplyModeChrome();
@@ -472,18 +331,18 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private void ShowStep(Models.SetupWizardStep step)
+        private void ShowStep(SetupWizardStep step)
         {
             if (Mode == SetupDialogMode.ExpiredTokenRecovery)
             {
-                step = Models.SetupWizardStep.Connection;
+                step = SetupWizardStep.Connection;
             }
-            else if (step == Models.SetupWizardStep.None)
+            else if (step == SetupWizardStep.None)
             {
-                step = Models.SetupWizardStep.Connection;
+                step = SetupWizardStep.Connection;
             }
 
-            if (_currentStep == Models.SetupWizardStep.ObjectTypes && step != Models.SetupWizardStep.ObjectTypes)
+            if (_currentStep == SetupWizardStep.ObjectTypes && step != SetupWizardStep.ObjectTypes)
             {
                 _hasStartedPage2Previews = false;
                 CancelPendingPreviewRender();
@@ -494,9 +353,9 @@ namespace OpenBISLabelStudio
             _currentStep = step;
             ClearFooterError();
 
-            pnlConnection.Visible = step == Models.SetupWizardStep.Connection;
-            pnlObjectTypes.Visible = step == Models.SetupWizardStep.ObjectTypes;
-            pnlPrinters.Visible = step == Models.SetupWizardStep.Printers;
+            pnlConnection.Visible = step == SetupWizardStep.Connection;
+            pnlObjectTypes.Visible = step == SetupWizardStep.ObjectTypes;
+            pnlPrinters.Visible = step == SetupWizardStep.Printers;
 
             if (Mode == SetupDialogMode.Wizard)
             {
@@ -507,10 +366,10 @@ namespace OpenBISLabelStudio
                 UpdateSettingsTabSelection(step);
             }
 
-            if (step == Models.SetupWizardStep.ObjectTypes)
+            if (step == SetupWizardStep.ObjectTypes)
             {
                 _hasVisitedTypesPage = true;
-                Models.LabelTemplateProfile initialProfile = GetSelectedOrDefaultPreviewProfile();
+                LabelTemplateProfile initialProfile = GetSelectedOrDefaultPreviewProfile();
                 if (IsHandleCreated)
                 {
                     ShowExamplePreviews(initialProfile);
@@ -521,35 +380,35 @@ namespace OpenBISLabelStudio
                     UpdatePreviewToggleVisuals();
                 }
             }
-            else if (step == Models.SetupWizardStep.Connection && Mode == SetupDialogMode.ExpiredTokenRecovery)
+            else if (step == SetupWizardStep.Connection && Mode == SetupDialogMode.ExpiredTokenRecovery)
             {
                 ActiveControl = txtToken;
             }
         }
 
-        private void UpdateWizardStepChrome(Models.SetupWizardStep step)
+        private void UpdateWizardStepChrome(SetupWizardStep step)
         {
             switch (step)
             {
-                case Models.SetupWizardStep.Connection:
+                case SetupWizardStep.Connection:
                     lblWizardTitle.Text = "Step 1 of 3 — Connect to openBIS";
                     lblWizardSubtitle.Text = "Enter your openBIS server URL and personal access token.";
                     btnBack.Enabled = false;
-                    btnNextFinish.Text = (_configService.HasValidConfiguredTypes() && _configService.HasPrinterConfig())
+                    btnNextFinish.Text = (_hasValidConfiguredTypes && _hasPrinterConfig)
                         ? "Finish"
                         : "Next >";
                     break;
 
-                case Models.SetupWizardStep.ObjectTypes:
+                case SetupWizardStep.ObjectTypes:
                     lblWizardTitle.Text = "Step 2 of 3 — Select Object Types & Label Templates";
                     lblWizardSubtitle.Text = "Choose which object types to enable and preview their label layouts.";
                     btnBack.Enabled = true;
-                    btnNextFinish.Text = (!_configService.HasPrinterConfig() || _cameFromPrintersStep)
+                    btnNextFinish.Text = (!_hasPrinterConfig || _cameFromPrintersStep)
                         ? "Next >"
                         : "Finish";
                     break;
 
-                case Models.SetupWizardStep.Printers:
+                case SetupWizardStep.Printers:
                     lblWizardTitle.Text = "Step 3 of 3 — Configure Printer Routing";
                     lblWizardSubtitle.Text = "Select the Windows printer queue for each label slot.";
                     btnBack.Enabled = true;
@@ -558,11 +417,11 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private void UpdateSettingsTabSelection(Models.SetupWizardStep activeStep)
+        private void UpdateSettingsTabSelection(SetupWizardStep activeStep)
         {
-            ApplyTabVisual(btnTabConnection, activeStep == Models.SetupWizardStep.Connection);
-            ApplyTabVisual(btnTabObjectTypes, activeStep == Models.SetupWizardStep.ObjectTypes);
-            ApplyTabVisual(btnTabPrinters, activeStep == Models.SetupWizardStep.Printers);
+            ApplyTabVisual(btnTabConnection, activeStep == SetupWizardStep.Connection);
+            ApplyTabVisual(btnTabObjectTypes, activeStep == SetupWizardStep.ObjectTypes);
+            ApplyTabVisual(btnTabPrinters, activeStep == SetupWizardStep.Printers);
         }
 
         private void ApplyTabVisual(Button tabButton, bool isActive)
@@ -574,28 +433,21 @@ namespace OpenBISLabelStudio
             tabButton.FlatAppearance.BorderSize = isActive ? 2 : 1;
         }
 
-        private void PopulatePrinterCombos(Models.PrinterConfig? savedPrinters)
+        private void PopulatePrinterCombos(PrinterDropdownState? printersState)
         {
-            IReadOnlyList<string>? rawPrinters = _installedPrintersProvider != null
-                ? _installedPrintersProvider()
-                : GetSystemInstalledPrinters();
+            PrinterDropdownState printers = printersState ?? new PrinterDropdownState();
 
-            Models.PrinterConfig defaults = AppConfigService.CreateDefaultPrinterConfig();
-            string preferredBox = !string.IsNullOrWhiteSpace(savedPrinters?.SmallBoxPrinter)
-                ? savedPrinters!.SmallBoxPrinter.Trim()
-                : defaults.SmallBoxPrinter;
-            string preferredMagnet = !string.IsNullOrWhiteSpace(savedPrinters?.MagnetPrinter)
-                ? savedPrinters!.MagnetPrinter.Trim()
-                : defaults.MagnetPrinter;
-            string preferredFlask = !string.IsNullOrWhiteSpace(savedPrinters?.FlaskPrinter)
-                ? savedPrinters!.FlaskPrinter.Trim()
-                : defaults.FlaskPrinter;
+            _fallbackSmallBoxPrinter = string.IsNullOrWhiteSpace(printers.SmallBoxPrinter)
+                ? "Brother PT-P700"
+                : printers.SmallBoxPrinter.Trim();
+            _fallbackMagnetPrinter = string.IsNullOrWhiteSpace(printers.MagnetPrinter)
+                ? "Brother PT-P700 (Kopie 1)"
+                : printers.MagnetPrinter.Trim();
+            _fallbackFlaskPrinter = string.IsNullOrWhiteSpace(printers.FlaskPrinter)
+                ? "Brother PT-P700 (Kopie 2)"
+                : printers.FlaskPrinter.Trim();
 
-            (List<string> brotherPrinters, bool hasInstalledBrotherPrinters) = AppConfigService.ResolveBrotherPrinterDropdownItems(
-                rawPrinters,
-                savedPrinters);
-
-            if (!hasInstalledBrotherPrinters)
+            if (!printers.HasInstalledBrotherPrinters)
             {
                 lblNoPrintersWarning.Visible = true;
                 lblNoPrintersWarning.Text = "No Brother PT-P700 printers detected — saved/default Brother PT-P700 printer names will be kept.";
@@ -605,56 +457,51 @@ namespace OpenBISLabelStudio
                 lblNoPrintersWarning.Visible = false;
             }
 
-            PopulateSinglePrinterCombo(cmbSmallBoxPrinter, brotherPrinters, preferredBox);
-            PopulateSinglePrinterCombo(cmbMagnetPrinter, brotherPrinters, preferredMagnet);
-            PopulateSinglePrinterCombo(cmbFlaskPrinter, brotherPrinters, preferredFlask);
+            PopulateSinglePrinterCombo(cmbSmallBoxPrinter, printers.AvailablePrinters, printers.SmallBoxSelectedIndex, _fallbackSmallBoxPrinter);
+            PopulateSinglePrinterCombo(cmbMagnetPrinter, printers.AvailablePrinters, printers.MagnetSelectedIndex, _fallbackMagnetPrinter);
+            PopulateSinglePrinterCombo(cmbFlaskPrinter, printers.AvailablePrinters, printers.FlaskSelectedIndex, _fallbackFlaskPrinter);
         }
 
-        private static void PopulateSinglePrinterCombo(ComboBox comboBox, IReadOnlyList<string> items, string preferredName)
+        private static void PopulateSinglePrinterCombo(
+            ComboBox comboBox,
+            IReadOnlyList<string>? items,
+            int preferredIndex,
+            string preferredName)
         {
             comboBox.Items.Clear();
-            foreach (string item in items)
+            if (items != null)
             {
-                comboBox.Items.Add(item);
-            }
-
-            if (comboBox.Items.Count > 0)
-            {
-                int index = AppConfigService.FindBestPrinterIndex(items, preferredName);
-                comboBox.SelectedIndex = index >= 0 && index < comboBox.Items.Count ? index : 0;
-            }
-        }
-
-        private static IReadOnlyList<string> GetSystemInstalledPrinters()
-        {
-            try
-            {
-                var printers = new List<string>();
-                foreach (string printer in PrinterSettings.InstalledPrinters)
+                foreach (string item in items)
                 {
-                    if (!string.IsNullOrWhiteSpace(printer))
+                    if (!string.IsNullOrWhiteSpace(item))
                     {
-                        printers.Add(printer);
+                        comboBox.Items.Add(item);
                     }
                 }
-
-                return printers;
             }
-            catch
-            {
-                return Array.Empty<string>();
-            }
-        }
 
-        private Models.PrinterConfig BuildPrinterConfigFromSelections()
-        {
-            Models.PrinterConfig defaults = AppConfigService.CreateDefaultPrinterConfig();
-            return new Models.PrinterConfig
+            if (comboBox.Items.Count == 0)
             {
-                SmallBoxPrinter = GetSelectedPrinterName(cmbSmallBoxPrinter, defaults.SmallBoxPrinter),
-                MagnetPrinter = GetSelectedPrinterName(cmbMagnetPrinter, defaults.MagnetPrinter),
-                FlaskPrinter = GetSelectedPrinterName(cmbFlaskPrinter, defaults.FlaskPrinter)
-            };
+                return;
+            }
+
+            if (preferredIndex >= 0 && preferredIndex < comboBox.Items.Count)
+            {
+                comboBox.SelectedIndex = preferredIndex;
+                return;
+            }
+
+            int matchedIndex = 0;
+            for (int i = 0; i < comboBox.Items.Count; i++)
+            {
+                if (string.Equals(comboBox.Items[i]?.ToString(), preferredName, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchedIndex = i;
+                    break;
+                }
+            }
+
+            comboBox.SelectedIndex = matchedIndex;
         }
 
         private static string GetSelectedPrinterName(ComboBox comboBox, string fallbackDefault)
@@ -672,7 +519,7 @@ namespace OpenBISLabelStudio
                 string filter = (txtTypeFilter.Text ?? "").Trim();
                 int targetRowIndex = -1;
 
-                foreach (TypeRowEntry entry in _masterTypeRows)
+                foreach (ObjectTypeRowDto entry in _masterTypeRows)
                 {
                     if (!string.IsNullOrEmpty(filter)
                         && !entry.Code.Contains(filter, StringComparison.OrdinalIgnoreCase)
@@ -723,7 +570,7 @@ namespace OpenBISLabelStudio
         {
             foreach (DataGridViewRow row in dgvObjectTypes.Rows)
             {
-                if (row.Tag is not TypeRowEntry entry)
+                if (row.Tag is not ObjectTypeRowDto entry)
                 {
                     continue;
                 }
@@ -733,34 +580,34 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private List<Models.ConfiguredOpenBisType> GetSelectedConfiguredTypes()
+        private IReadOnlyList<ObjectTypeRowDto> GetMasterTypeRowsSnapshot()
         {
             return _masterTypeRows
-                .Where(r => r.IsSelected && !string.IsNullOrWhiteSpace(r.Code))
-                .Select(r => new Models.ConfiguredOpenBisType
+                .Where(r => !string.IsNullOrWhiteSpace(r.Code))
+                .Select(r => new ObjectTypeRowDto
                 {
+                    IsSelected = r.IsSelected,
                     Code = r.Code.Trim(),
-                    DisplayName = string.IsNullOrWhiteSpace(r.DisplayName)
-                        ? AppConfigService.FormatFriendlyName(r.Code)
-                        : r.DisplayName.Trim(),
+                    DisplayName = string.IsNullOrWhiteSpace(r.DisplayName) ? r.Code.Trim() : r.DisplayName.Trim(),
                     TemplateProfile = r.TemplateProfile
                 })
-                .ToList();
+                .ToList()
+                .AsReadOnly();
         }
 
-        private Models.LabelTemplateProfile GetSelectedOrDefaultPreviewProfile()
+        private LabelTemplateProfile GetSelectedOrDefaultPreviewProfile()
         {
-            if (dgvObjectTypes.CurrentRow?.Tag is TypeRowEntry currentEntry)
+            if (dgvObjectTypes.CurrentRow?.Tag is ObjectTypeRowDto currentEntry)
             {
                 return currentEntry.TemplateProfile;
             }
 
-            TypeRowEntry? firstSelected = _masterTypeRows.FirstOrDefault(r => r.IsSelected)
-                                         ?? _masterTypeRows.FirstOrDefault();
-            return firstSelected?.TemplateProfile ?? Models.LabelTemplateProfile.Molecule;
+            ObjectTypeRowDto? firstSelected = _masterTypeRows.FirstOrDefault(r => r.IsSelected)
+                                              ?? _masterTypeRows.FirstOrDefault();
+            return firstSelected?.TemplateProfile ?? LabelTemplateProfile.Molecule;
         }
 
-        private void ShowExamplePreviews(Models.LabelTemplateProfile profile)
+        private void ShowExamplePreviews(LabelTemplateProfile profile)
         {
             if (_resourcesDisposed || IsDisposed || Disposing)
             {
@@ -780,14 +627,14 @@ namespace OpenBISLabelStudio
             _activePreviewProfile = profile;
             UpdatePreviewToggleVisuals();
 
-            SetSlotPreviewOrPlaceholder(picPreviewSmallBox, Models.LabelTemplateType.SmallBox12mm, profile);
-            SetSlotPreviewOrPlaceholder(picPreviewMagnet, Models.LabelTemplateType.Magnet12mm, profile);
-            SetSlotPreviewOrPlaceholder(picPreviewFlask, Models.LabelTemplateType.Flask24mm, profile);
+            SetSlotPreviewOrPlaceholder(picPreviewSmallBox, LabelTemplateType.SmallBox12mm, profile);
+            SetSlotPreviewOrPlaceholder(picPreviewMagnet, LabelTemplateType.Magnet12mm, profile);
+            SetSlotPreviewOrPlaceholder(picPreviewFlask, LabelTemplateType.Flask24mm, profile);
 
             bool needsPrimaryRender = AnySlotUncached(profile);
-            Models.LabelTemplateProfile otherProfile = profile == Models.LabelTemplateProfile.Molecule
-                ? Models.LabelTemplateProfile.Generic
-                : Models.LabelTemplateProfile.Molecule;
+            LabelTemplateProfile otherProfile = profile == LabelTemplateProfile.Molecule
+                ? LabelTemplateProfile.Generic
+                : LabelTemplateProfile.Molecule;
             bool needsPrewarm = AnySlotUncached(otherProfile);
 
             if (!needsPrimaryRender && !needsPrewarm)
@@ -799,11 +646,11 @@ namespace OpenBISLabelStudio
             _ = LoadAndPrewarmExamplePreviewsAsync(profile, otherProfile, requestVersion, _previewRenderCts.Token);
         }
 
-        private bool AnySlotUncached(Models.LabelTemplateProfile profile)
+        private bool AnySlotUncached(LabelTemplateProfile profile)
         {
-            foreach (Models.LabelTemplateType slot in Enum.GetValues<Models.LabelTemplateType>())
+            foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
             {
-                if (!_previewCache.ContainsKey((profile, slot)))
+                if (!_previewPngCache.ContainsKey((profile, slot)))
                 {
                     return true;
                 }
@@ -814,40 +661,99 @@ namespace OpenBISLabelStudio
 
         private void SetSlotPreviewOrPlaceholder(
             PictureBox picBox,
-            Models.LabelTemplateType slot,
-            Models.LabelTemplateProfile profile)
+            LabelTemplateType slot,
+            LabelTemplateProfile profile)
         {
-            if (_previewCache.TryGetValue((profile, slot), out Image? cachedImage))
-            {
-                AssignPreviewPictureBoxImage(picBox, cachedImage);
-            }
-            else
-            {
-                AssignPreviewPictureBoxImage(picBox, LabelPreviewRenderer.CreateLoadingPreviewBitmap(slot, profile));
-            }
+            byte[] pngBytes = _previewPngCache.TryGetValue((profile, slot), out byte[]? cachedBytes)
+                ? cachedBytes
+                : _backend.GetLoadingPreviewPng(slot, profile);
+
+            Bitmap bmp = Form1.DecodePngBitmap(
+                pngBytes,
+                () => _backend.GetFallbackPreviewPng(slot, profile, "Preview unavailable"));
+            AssignPreviewPictureBoxImage(picBox, bmp);
         }
 
         private async Task LoadAndPrewarmExamplePreviewsAsync(
-            Models.LabelTemplateProfile requestedProfile,
-            Models.LabelTemplateProfile secondaryProfile,
+            LabelTemplateProfile requestedProfile,
+            LabelTemplateProfile secondaryProfile,
             long requestVersion,
             CancellationToken cancellationToken)
         {
             try
             {
-                await RenderProfileSlotsAsync(requestedProfile, requestVersion, updateUiOnSlotReady: true, cancellationToken);
+                if (AnySlotUncached(requestedProfile))
+                {
+                    var updatedSlots = new HashSet<LabelTemplateType>();
+                    Dictionary<LabelTemplateType, byte[]> primaryPreviews = await _backend.GetExamplePreviewsAsync(
+                        requestedProfile,
+                        onSlotReady: (slot, pngBytes) => MarshalSlotExampleReady(
+                            requestedProfile,
+                            slot,
+                            pngBytes,
+                            requestVersion,
+                            updatedSlots,
+                            cancellationToken),
+                        cancellationToken);
+
+                    if (cancellationToken.IsCancellationRequested
+                        || IsDisposed
+                        || Disposing
+                        || _resourcesDisposed
+                        || requestVersion != _previewRenderVersion
+                        || _currentStep != SetupWizardStep.ObjectTypes)
+                    {
+                        return;
+                    }
+
+                    foreach (KeyValuePair<LabelTemplateType, byte[]> kvp in primaryPreviews)
+                    {
+                        byte[] safeBytes = kvp.Value ?? Array.Empty<byte>();
+                        _previewPngCache[(requestedProfile, kvp.Key)] = safeBytes;
+
+                        if (!updatedSlots.Contains(kvp.Key) && _activePreviewProfile == requestedProfile)
+                        {
+                            updatedSlots.Add(kvp.Key);
+                            Bitmap bmp = Form1.DecodePngBitmap(
+                                safeBytes,
+                                () => _backend.GetFallbackPreviewPng(kvp.Key, requestedProfile, "Preview unavailable"));
+                            AssignPreviewPictureBoxImage(GetPreviewPictureBox(kvp.Key), bmp);
+                        }
+                    }
+                }
 
                 if (cancellationToken.IsCancellationRequested
                     || IsDisposed
                     || Disposing
                     || _resourcesDisposed
                     || requestVersion != _previewRenderVersion
-                    || _currentStep != Models.SetupWizardStep.ObjectTypes)
+                    || _currentStep != SetupWizardStep.ObjectTypes)
                 {
                     return;
                 }
 
-                await RenderProfileSlotsAsync(secondaryProfile, requestVersion, updateUiOnSlotReady: false, cancellationToken);
+                if (AnySlotUncached(secondaryProfile))
+                {
+                    Dictionary<LabelTemplateType, byte[]> secondaryPreviews = await _backend.GetExamplePreviewsAsync(
+                        secondaryProfile,
+                        onSlotReady: null,
+                        cancellationToken);
+
+                    if (cancellationToken.IsCancellationRequested
+                        || IsDisposed
+                        || Disposing
+                        || _resourcesDisposed
+                        || requestVersion != _previewRenderVersion
+                        || _currentStep != SetupWizardStep.ObjectTypes)
+                    {
+                        return;
+                    }
+
+                    foreach (KeyValuePair<LabelTemplateType, byte[]> kvp in secondaryPreviews)
+                    {
+                        _previewPngCache[(secondaryProfile, kvp.Key)] = kvp.Value ?? Array.Empty<byte>();
+                    }
+                }
             }
             catch (OperationCanceledException)
             {
@@ -855,82 +761,76 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private async Task RenderProfileSlotsAsync(
-            Models.LabelTemplateProfile profile,
+        private void MarshalSlotExampleReady(
+            LabelTemplateProfile profile,
+            LabelTemplateType slot,
+            byte[] pngBytes,
             long requestVersion,
-            bool updateUiOnSlotReady,
+            HashSet<LabelTemplateType> updatedSlots,
             CancellationToken cancellationToken)
         {
-            foreach (Models.LabelTemplateType slot in Enum.GetValues<Models.LabelTemplateType>())
+            if (_resourcesDisposed || IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
             {
-                if (cancellationToken.IsCancellationRequested
-                    || IsDisposed
-                    || Disposing
-                    || _resourcesDisposed
-                    || requestVersion != _previewRenderVersion
-                    || _currentStep != Models.SetupWizardStep.ObjectTypes)
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
                 {
-                    return;
+                    BeginInvoke(new Action(() =>
+                        MarshalSlotExampleReady(profile, slot, pngBytes, requestVersion, updatedSlots, cancellationToken)));
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Ignore callbacks arriving as form disposes.
+                }
+                catch (InvalidOperationException)
+                {
+                    // Ignore callbacks arriving before handle creation or after handle destruction.
                 }
 
-                if (_previewCache.ContainsKey((profile, slot)))
-                {
-                    continue;
-                }
+                return;
+            }
 
-                Image rendered = await _previewRenderer.RenderExampleSlotPreviewAsync(
-                    slot,
-                    profile,
-                    cancellationToken);
+            if (_resourcesDisposed
+                || IsDisposed
+                || Disposing
+                || cancellationToken.IsCancellationRequested
+                || requestVersion != _previewRenderVersion
+                || _currentStep != SetupWizardStep.ObjectTypes)
+            {
+                return;
+            }
 
-                if (IsDisposed || Disposing || _resourcesDisposed)
-                {
-                    rendered.Dispose();
-                    return;
-                }
+            byte[] safeBytes = pngBytes ?? Array.Empty<byte>();
+            _previewPngCache[(profile, slot)] = safeBytes;
 
-                Image imageToDisplay;
-                if (_previewCache.TryGetValue((profile, slot), out Image? existing))
-                {
-                    rendered.Dispose();
-                    imageToDisplay = existing;
-                }
-                else
-                {
-                    _previewCache[(profile, slot)] = rendered;
-                    imageToDisplay = rendered;
-                }
-
-                if (updateUiOnSlotReady
-                    && !cancellationToken.IsCancellationRequested
-                    && requestVersion == _previewRenderVersion
-                    && _activePreviewProfile == profile
-                    && _currentStep == Models.SetupWizardStep.ObjectTypes)
-                {
-                    AssignPreviewPictureBoxImage(GetPreviewPictureBox(slot), imageToDisplay);
-                }
+            if (_activePreviewProfile == profile && updatedSlots.Add(slot))
+            {
+                Bitmap bmp = Form1.DecodePngBitmap(
+                    safeBytes,
+                    () => _backend.GetFallbackPreviewPng(slot, profile, "Preview unavailable"));
+                AssignPreviewPictureBoxImage(GetPreviewPictureBox(slot), bmp);
             }
         }
 
-        private PictureBox GetPreviewPictureBox(Models.LabelTemplateType slot)
+        private PictureBox GetPreviewPictureBox(LabelTemplateType slot)
         {
             return slot switch
             {
-                Models.LabelTemplateType.SmallBox12mm => picPreviewSmallBox,
-                Models.LabelTemplateType.Magnet12mm => picPreviewMagnet,
-                Models.LabelTemplateType.Flask24mm => picPreviewFlask,
+                LabelTemplateType.SmallBox12mm => picPreviewSmallBox,
+                LabelTemplateType.Magnet12mm => picPreviewMagnet,
+                LabelTemplateType.Flask24mm => picPreviewFlask,
                 _ => picPreviewSmallBox
             };
         }
 
-        private void AssignPreviewPictureBoxImage(PictureBox? picBox, Image? nextImage)
+        private static void AssignPreviewPictureBoxImage(PictureBox? picBox, Image? nextImage)
         {
             if (picBox == null || picBox.IsDisposed)
             {
-                if (nextImage != null && !IsCachedPreviewImage(nextImage))
-                {
-                    nextImage.Dispose();
-                }
+                nextImage?.Dispose();
                 return;
             }
 
@@ -941,23 +841,7 @@ namespace OpenBISLabelStudio
             }
 
             picBox.Image = nextImage;
-            if (previous != null && !IsCachedPreviewImage(previous))
-            {
-                previous.Dispose();
-            }
-        }
-
-        private bool IsCachedPreviewImage(Image image)
-        {
-            foreach (Image cached in _previewCache.Values)
-            {
-                if (ReferenceEquals(cached, image))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            previous?.Dispose();
         }
 
         private void CancelPendingPreviewRender()
@@ -982,7 +866,7 @@ namespace OpenBISLabelStudio
 
         private void UpdatePreviewToggleVisuals()
         {
-            bool isMolecule = _activePreviewProfile == Models.LabelTemplateProfile.Molecule;
+            bool isMolecule = _activePreviewProfile == LabelTemplateProfile.Molecule;
 
             StylePreviewToggleButton(btnPreviewMolecule, isMolecule);
             StylePreviewToggleButton(btnPreviewGeneric, !isMolecule);
@@ -999,47 +883,25 @@ namespace OpenBISLabelStudio
             button.FlatAppearance.BorderSize = isActive ? 2 : 1;
         }
 
-        private static Models.LabelTemplateProfile GetDefaultProfileForCode(string code)
+        private static LabelTemplateProfile GetDefaultProfileForCode(string code)
         {
             return code.Trim().Equals("SUBSTANCE", StringComparison.OrdinalIgnoreCase)
-                ? Models.LabelTemplateProfile.Molecule
-                : Models.LabelTemplateProfile.Generic;
+                ? LabelTemplateProfile.Molecule
+                : LabelTemplateProfile.Generic;
         }
 
-        private static string ProfileToDisplayString(Models.LabelTemplateProfile profile)
+        private static string ProfileToDisplayString(LabelTemplateProfile profile)
         {
-            return profile == Models.LabelTemplateProfile.Molecule
+            return profile == LabelTemplateProfile.Molecule
                 ? StyleMoleculeDisplay
                 : StyleGenericDisplay;
         }
 
-        private static Models.LabelTemplateProfile DisplayStringToProfile(string? display)
+        private static LabelTemplateProfile DisplayStringToProfile(string? display)
         {
             return string.Equals(display?.Trim(), StyleMoleculeDisplay, StringComparison.OrdinalIgnoreCase)
-                ? Models.LabelTemplateProfile.Molecule
-                : Models.LabelTemplateProfile.Generic;
-        }
-
-        private bool ValidateConnectionInputs(out string url, out string token, out string errorMessage)
-        {
-            url = (txtInstanceUrl.Text ?? "").Trim();
-            token = (txtToken.Text ?? "").Trim();
-
-            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? parsedUri)
-                || (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
-            {
-                errorMessage = "Enter a valid openBIS Instance URL starting with http:// or https://.";
-                return false;
-            }
-
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                errorMessage = "Enter an openBIS Personal Access Token.";
-                return false;
-            }
-
-            errorMessage = "";
-            return true;
+                ? LabelTemplateProfile.Molecule
+                : LabelTemplateProfile.Generic;
         }
 
         private bool IsValidatedForCurrentInputs()
@@ -1050,21 +912,6 @@ namespace OpenBISLabelStudio
                    && string.Equals(_validatedToken, token, StringComparison.Ordinal);
         }
 
-        private bool TryPersistConfig(Action saveAction, out string errorMessage)
-        {
-            try
-            {
-                saveAction();
-                errorMessage = "";
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errorMessage = $"Could not save configuration files: {ex.Message}";
-                return false;
-            }
-        }
-
         private async Task<bool> RunLiveConnectionCheckAsync(bool saveCredentialsOnSuccess)
         {
             if (_isBusy)
@@ -1072,30 +919,32 @@ namespace OpenBISLabelStudio
                 return false;
             }
 
-            if (!ValidateConnectionInputs(out string url, out string token, out string inputError))
-            {
-                SetConnectionStatus(inputError, StatusSeverity.Error);
-                return false;
-            }
+            string url = (txtInstanceUrl.Text ?? "").Trim();
+            string token = (txtToken.Text ?? "").Trim();
 
             SetBusy(true);
             SetConnectionStatus("Checking openBIS session...", StatusSeverity.Info);
 
             try
             {
-                Models.OpenBisConnectionResult result = await _openBisClient.CheckConnectionAsync(url, token);
+                ConnectionCheckResult result = await _backend.TestConnectionAsync(
+                    url,
+                    token,
+                    persistOnSuccess: saveCredentialsOnSuccess);
+
                 if (IsDisposed || Disposing)
                 {
                     return result.Success;
                 }
 
+                SetBusy(false);
+
                 if (!result.Success)
                 {
                     _validatedUrl = "";
                     _validatedToken = "";
-                    string message = FormatOpenBisFailureMessage(result.ErrorType, result.Error, "Failed to verify openBIS session.");
-                    SetConnectionStatus(message, StatusSeverity.Error);
-                    if (string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
+                    SetConnectionStatus(result.Message, StatusSeverity.Error);
+                    if (result.ShouldFocusToken)
                     {
                         txtToken.Focus();
                         txtToken.SelectAll();
@@ -1104,25 +953,9 @@ namespace OpenBISLabelStudio
                     return false;
                 }
 
-                _validatedUrl = url;
+                _validatedUrl = string.IsNullOrWhiteSpace(result.NormalizedUrl) ? url : result.NormalizedUrl;
                 _validatedToken = token;
-
-                if (saveCredentialsOnSuccess && !TryPersistConfig(
-                        () => _configService.SaveAppConfig(new Models.AppConfig
-                        {
-                            OpenBisUrl = url,
-                            Token = token
-                        }),
-                        out string saveError))
-                {
-                    SetConnectionStatus(saveError, StatusSeverity.Error);
-                    return false;
-                }
-
-                string suffix = saveCredentialsOnSuccess ? " Credentials saved." : "";
-                SetConnectionStatus(
-                    $"Connected successfully (session active).{suffix}",
-                    StatusSeverity.Success);
+                SetConnectionStatus(result.Message, StatusSeverity.Success);
                 return true;
             }
             catch (Exception ex)
@@ -1152,20 +985,8 @@ namespace OpenBISLabelStudio
 
             _autoFetchAttemptedForCurrentInputs = true;
             long fetchVersion = ++_typesFetchVersion;
-
-            if (!ValidateConnectionInputs(out string url, out string token, out string inputError))
-            {
-                if (redirectToConnectionOnExpiredToken)
-                {
-                    ShowStep(Models.SetupWizardStep.Connection);
-                    SetConnectionStatus(inputError, StatusSeverity.Error);
-                }
-                else
-                {
-                    SetTypesStatus($"Offline mode: showing saved object types ({inputError})", StatusSeverity.Warning);
-                }
-                return;
-            }
+            string url = (txtInstanceUrl.Text ?? "").Trim();
+            string token = (txtToken.Text ?? "").Trim();
 
             // Keep the Object Types grid, filter, Save, and navigation unlocked so user selection
             // is never blocked while openBIS types load in the background.
@@ -1174,40 +995,58 @@ namespace OpenBISLabelStudio
 
             try
             {
-                Models.OpenBisTypesResult result = await _openBisClient.QueryTypesAsync(url, token);
+                ServerTypeSyncResult result = await _backend.FetchAndMergeServerTypesAsync(
+                    url,
+                    token,
+                    GetMasterTypeRowsSnapshot());
+
                 if (IsDisposed || Disposing || fetchVersion != _typesFetchVersion)
                 {
                     return;
                 }
 
-                if (!string.Equals(url, txtInstanceUrl.Text.Trim(), StringComparison.Ordinal)
-                    || !string.Equals(token, txtToken.Text.Trim(), StringComparison.Ordinal))
+                if (!string.Equals(url, (txtInstanceUrl.Text ?? "").Trim(), StringComparison.Ordinal)
+                    || !string.Equals(token, (txtToken.Text ?? "").Trim(), StringComparison.Ordinal))
                 {
+                    return;
+                }
+
+                if (result.ValidationFailed)
+                {
+                    if (redirectToConnectionOnExpiredToken)
+                    {
+                        ShowStep(SetupWizardStep.Connection);
+                        SetConnectionStatus(result.StatusMessage, StatusSeverity.Error);
+                    }
+                    else
+                    {
+                        SetTypesStatus($"Offline mode: showing saved object types ({result.StatusMessage})", StatusSeverity.Warning);
+                    }
+
                     return;
                 }
 
                 if (!result.Success)
                 {
-                    if (redirectToConnectionOnExpiredToken
-                        && string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
+                    if (redirectToConnectionOnExpiredToken && result.IsTokenExpired)
                     {
-                        ShowStep(Models.SetupWizardStep.Connection);
-                        SetConnectionStatus(FormatOpenBisFailureMessage(result), StatusSeverity.Error);
+                        ShowStep(SetupWizardStep.Connection);
+                        SetConnectionStatus(result.StatusMessage, StatusSeverity.Error);
                         txtToken.Focus();
                         txtToken.SelectAll();
                         return;
                     }
 
                     SetTypesStatus(
-                        $"Offline mode: showing saved object types from local config ({FormatOpenBisFailureMessage(result)})",
+                        $"Offline mode: showing saved object types from local config ({result.StatusMessage})",
                         StatusSeverity.Warning);
                     return;
                 }
 
                 _validatedUrl = url;
                 _validatedToken = token;
-                ApplyServerTypes(result.Types);
-                SetTypesStatus($"Loaded {result.Types.Count} object type(s) from openBIS.", StatusSeverity.Success);
+                ApplyTypeRows(result.MergedRows, syncedFromServer: true);
+                SetTypesStatus(result.StatusMessage, StatusSeverity.Success);
             }
             catch (Exception ex)
             {
@@ -1215,7 +1054,7 @@ namespace OpenBISLabelStudio
                 {
                     string message = $"Offline mode: showing saved object types ({ex.Message})";
                     SetTypesStatus(message, StatusSeverity.Warning);
-                    if (_currentStep == Models.SetupWizardStep.Connection)
+                    if (_currentStep == SetupWizardStep.Connection)
                     {
                         SetConnectionStatus(message, StatusSeverity.Warning);
                     }
@@ -1228,32 +1067,6 @@ namespace OpenBISLabelStudio
                     SetTypesLoadingState(false);
                 }
             }
-        }
-
-        private static string FormatOpenBisFailureMessage(Models.OpenBisTypesResult result)
-        {
-            return FormatOpenBisFailureMessage(result.ErrorType, result.Error, "Failed to query openBIS object types.");
-        }
-
-        private static string FormatOpenBisFailureMessage(string? errorType, string? error, string fallback)
-        {
-            if (string.Equals(errorType, "token_expired", StringComparison.OrdinalIgnoreCase))
-            {
-                return string.IsNullOrWhiteSpace(error)
-                    ? "Your openBIS personal access token has expired or is invalid. Please enter a new token."
-                    : $"Token expired or invalid: {error}";
-            }
-
-            if (string.Equals(errorType, "connection_error", StringComparison.OrdinalIgnoreCase))
-            {
-                return string.IsNullOrWhiteSpace(error)
-                    ? "Could not connect to the openBIS server."
-                    : $"Connection error: {error}";
-            }
-
-            return string.IsNullOrWhiteSpace(error)
-                ? fallback
-                : error;
         }
 
         private void SetTypesLoadingState(bool loading)
@@ -1270,13 +1083,13 @@ namespace OpenBISLabelStudio
             txtInstanceUrl.ReadOnly = busy;
             txtToken.ReadOnly = busy;
             btnTestConnection.Enabled = !busy;
-            prgConnectionLoading.Visible = busy && _currentStep == Models.SetupWizardStep.Connection;
+            prgConnectionLoading.Visible = busy && _currentStep == SetupWizardStep.Connection;
             btnNextFinish.Enabled = !busy;
             btnRefreshTypes.Enabled = !busy && !_isLoadingTypes;
             btnTabConnection.Enabled = !busy;
             btnTabObjectTypes.Enabled = !busy;
             btnTabPrinters.Enabled = !busy;
-            btnBack.Enabled = !busy && Mode == SetupDialogMode.Wizard && _currentStep != Models.SetupWizardStep.Connection;
+            btnBack.Enabled = !busy && Mode == SetupDialogMode.Wizard && _currentStep != SetupWizardStep.Connection;
         }
 
         private enum StatusSeverity
@@ -1334,7 +1147,7 @@ namespace OpenBISLabelStudio
             _validatedUrl = "";
             _validatedToken = "";
             _autoFetchAttemptedForCurrentInputs = false;
-            CachedServerTypes = null;
+            TypesSyncedFromServer = false;
         }
 
         private void chkShowToken_CheckedChanged(object? sender, EventArgs e)
@@ -1371,23 +1184,23 @@ namespace OpenBISLabelStudio
                 {
                     if (validationError.Contains("object type", StringComparison.OrdinalIgnoreCase))
                     {
-                        ShowStep(Models.SetupWizardStep.ObjectTypes);
+                        ShowStep(SetupWizardStep.ObjectTypes);
                         SetTypesStatus(validationError, StatusSeverity.Error);
                     }
                     else if (validationError.StartsWith("Could not save configuration files:", StringComparison.Ordinal))
                     {
-                        if (_currentStep == Models.SetupWizardStep.Connection)
+                        if (_currentStep == SetupWizardStep.Connection)
                         {
                             SetConnectionStatus(validationError, StatusSeverity.Error);
                         }
-                        else if (_currentStep == Models.SetupWizardStep.ObjectTypes)
+                        else if (_currentStep == SetupWizardStep.ObjectTypes)
                         {
                             SetTypesStatus(validationError, StatusSeverity.Error);
                         }
                     }
                     else
                     {
-                        ShowStep(Models.SetupWizardStep.Connection);
+                        ShowStep(SetupWizardStep.Connection);
                         SetConnectionStatus(validationError, StatusSeverity.Error);
                     }
 
@@ -1410,15 +1223,21 @@ namespace OpenBISLabelStudio
         {
             if (IsValidatedForCurrentInputs())
             {
-                if (!TryPersistConfig(
-                        () => _configService.SaveAppConfig(new Models.AppConfig
-                        {
-                            OpenBisUrl = txtInstanceUrl.Text.Trim(),
-                            Token = txtToken.Text.Trim()
-                        }),
-                        out string saveError))
+                OperationResult saveRes = await _backend.SaveWizardStepAsync(new WizardStepSaveRequest
                 {
-                    SetConnectionStatus(saveError, StatusSeverity.Error);
+                    Step = SetupWizardStep.Connection,
+                    OpenBisUrl = (txtInstanceUrl.Text ?? "").Trim(),
+                    Token = (txtToken.Text ?? "").Trim()
+                });
+
+                if (IsDisposed || Disposing)
+                {
+                    return;
+                }
+
+                if (!saveRes.Success)
+                {
+                    SetConnectionStatus(saveRes.ErrorMessage, StatusSeverity.Error);
                     return;
                 }
 
@@ -1441,7 +1260,7 @@ namespace OpenBISLabelStudio
         {
             switch (_currentStep)
             {
-                case Models.SetupWizardStep.Connection:
+                case SetupWizardStep.Connection:
                 {
                     if (!IsValidatedForCurrentInputs())
                     {
@@ -1453,92 +1272,128 @@ namespace OpenBISLabelStudio
                     }
                     else
                     {
-                        if (!TryPersistConfig(
-                                () => _configService.SaveAppConfig(new Models.AppConfig
-                                {
-                                    OpenBisUrl = txtInstanceUrl.Text.Trim(),
-                                    Token = txtToken.Text.Trim()
-                                }),
-                                out string saveError))
+                        OperationResult saveRes = await _backend.SaveWizardStepAsync(new WizardStepSaveRequest
                         {
-                            SetConnectionStatus(saveError, StatusSeverity.Error);
+                            Step = SetupWizardStep.Connection,
+                            OpenBisUrl = (txtInstanceUrl.Text ?? "").Trim(),
+                            Token = (txtToken.Text ?? "").Trim()
+                        });
+
+                        if (IsDisposed || Disposing)
+                        {
+                            return;
+                        }
+
+                        if (!saveRes.Success)
+                        {
+                            SetConnectionStatus(saveRes.ErrorMessage, StatusSeverity.Error);
                             return;
                         }
                     }
 
-                    bool hasTypes = _configService.HasValidConfiguredTypes();
-                    bool hasPrinters = _configService.HasPrinterConfig();
+                    SettingsSnapshotDto snapshot = await _backend.GetSettingsSnapshotAsync();
+                    if (IsDisposed || Disposing)
+                    {
+                        return;
+                    }
 
-                    if (hasTypes && hasPrinters)
+                    _hasValidConfiguredTypes = snapshot.HasValidConfiguredTypes;
+                    _hasPrinterConfig = snapshot.HasPrinterConfig;
+
+                    if (_hasValidConfiguredTypes && _hasPrinterConfig)
                     {
                         DialogResult = DialogResult.OK;
                         Close();
                         return;
                     }
 
-                    ShowStep(!hasTypes ? Models.SetupWizardStep.ObjectTypes : Models.SetupWizardStep.Printers);
-                    if (_currentStep == Models.SetupWizardStep.ObjectTypes && CachedServerTypes == null)
+                    ShowStep(!_hasValidConfiguredTypes ? SetupWizardStep.ObjectTypes : SetupWizardStep.Printers);
+                    if (_currentStep == SetupWizardStep.ObjectTypes && !TypesSyncedFromServer)
                     {
                         await LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
                     }
                     break;
                 }
 
-                case Models.SetupWizardStep.ObjectTypes:
+                case SetupWizardStep.ObjectTypes:
                 {
                     CommitGridEdits();
                     SyncVisibleGridToMaster();
-                    List<Models.ConfiguredOpenBisType> selectedTypes = GetSelectedConfiguredTypes();
-                    if (selectedTypes.Count == 0)
+                    IReadOnlyList<ObjectTypeRowDto> rowsSnapshot = GetMasterTypeRowsSnapshot();
+                    if (!rowsSnapshot.Any(r => r.IsSelected))
                     {
                         SetTypesStatus("Select at least one object type.", StatusSeverity.Error);
                         return;
                     }
 
-                    if (_configService.HasPrinterConfig() && !_cameFromPrintersStep)
+                    if (_hasPrinterConfig && !_cameFromPrintersStep)
                     {
-                        if (!TryPersistConfig(() => _configService.SaveConfiguredTypes(selectedTypes), out string saveError))
+                        OperationResult saveRes = await _backend.SaveWizardStepAsync(new WizardStepSaveRequest
                         {
-                            SetTypesStatus(saveError, StatusSeverity.Error);
+                            Step = SetupWizardStep.ObjectTypes,
+                            ObjectTypes = rowsSnapshot
+                        });
+
+                        if (IsDisposed || Disposing)
+                        {
                             return;
                         }
 
+                        if (!saveRes.Success)
+                        {
+                            SetTypesStatus(saveRes.ErrorMessage, StatusSeverity.Error);
+                            return;
+                        }
+
+                        _hasValidConfiguredTypes = true;
                         DialogResult = DialogResult.OK;
                         Close();
                         return;
                     }
 
-                    ShowStep(Models.SetupWizardStep.Printers);
+                    ShowStep(SetupWizardStep.Printers);
                     break;
                 }
 
-                case Models.SetupWizardStep.Printers:
+                case SetupWizardStep.Printers:
                 {
+                    IReadOnlyList<ObjectTypeRowDto>? objectTypes = null;
                     if (_hasVisitedTypesPage)
                     {
                         CommitGridEdits();
                         SyncVisibleGridToMaster();
-                        List<Models.ConfiguredOpenBisType> selectedTypes = GetSelectedConfiguredTypes();
-                        if (selectedTypes.Count == 0)
+                        IReadOnlyList<ObjectTypeRowDto> rowsSnapshot = GetMasterTypeRowsSnapshot();
+                        if (!rowsSnapshot.Any(r => r.IsSelected))
                         {
-                            ShowStep(Models.SetupWizardStep.ObjectTypes);
+                            ShowStep(SetupWizardStep.ObjectTypes);
                             SetTypesStatus("Select at least one object type.", StatusSeverity.Error);
                             return;
                         }
 
-                        if (!TryPersistConfig(() => _configService.SaveConfiguredTypes(selectedTypes), out string typesSaveError))
-                        {
-                            ShowFooterError(typesSaveError);
-                            return;
-                        }
+                        objectTypes = rowsSnapshot;
                     }
 
-                    if (!TryPersistConfig(() => _configService.SavePrinterConfig(BuildPrinterConfigFromSelections()), out string printerSaveError))
+                    OperationResult saveRes = await _backend.SaveWizardStepAsync(new WizardStepSaveRequest
                     {
-                        ShowFooterError(printerSaveError);
+                        Step = SetupWizardStep.Printers,
+                        ObjectTypes = objectTypes,
+                        SmallBoxPrinter = GetSelectedPrinterName(cmbSmallBoxPrinter, _fallbackSmallBoxPrinter),
+                        MagnetPrinter = GetSelectedPrinterName(cmbMagnetPrinter, _fallbackMagnetPrinter),
+                        FlaskPrinter = GetSelectedPrinterName(cmbFlaskPrinter, _fallbackFlaskPrinter)
+                    });
+
+                    if (IsDisposed || Disposing)
+                    {
                         return;
                     }
 
+                    if (!saveRes.Success)
+                    {
+                        ShowFooterError(saveRes.ErrorMessage);
+                        return;
+                    }
+
+                    _hasPrinterConfig = true;
                     DialogResult = DialogResult.OK;
                     Close();
                     break;
@@ -1553,18 +1408,18 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            if (_currentStep == Models.SetupWizardStep.Printers)
+            if (_currentStep == SetupWizardStep.Printers)
             {
                 _cameFromPrintersStep = true;
-                ShowStep(Models.SetupWizardStep.ObjectTypes);
-                if (CachedServerTypes == null && !_autoFetchAttemptedForCurrentInputs)
+                ShowStep(SetupWizardStep.ObjectTypes);
+                if (!TypesSyncedFromServer && !_autoFetchAttemptedForCurrentInputs)
                 {
                     await LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
                 }
             }
-            else if (_currentStep == Models.SetupWizardStep.ObjectTypes)
+            else if (_currentStep == SetupWizardStep.ObjectTypes)
             {
-                ShowStep(Models.SetupWizardStep.Connection);
+                ShowStep(SetupWizardStep.Connection);
             }
         }
 
@@ -1578,7 +1433,7 @@ namespace OpenBISLabelStudio
         {
             if (!_isBusy && Mode == SetupDialogMode.Settings)
             {
-                ShowStep(Models.SetupWizardStep.Connection);
+                ShowStep(SetupWizardStep.Connection);
             }
         }
 
@@ -1589,8 +1444,8 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            ShowStep(Models.SetupWizardStep.ObjectTypes);
-            if (CachedServerTypes == null && !_autoFetchAttemptedForCurrentInputs)
+            ShowStep(SetupWizardStep.ObjectTypes);
+            if (!TypesSyncedFromServer && !_autoFetchAttemptedForCurrentInputs)
             {
                 await LoadServerTypesForCurrentPageAsync(redirectToConnectionOnExpiredToken: true);
             }
@@ -1600,7 +1455,7 @@ namespace OpenBISLabelStudio
         {
             if (!_isBusy && Mode == SetupDialogMode.Settings)
             {
-                ShowStep(Models.SetupWizardStep.Printers);
+                ShowStep(SetupWizardStep.Printers);
             }
         }
 
@@ -1626,7 +1481,7 @@ namespace OpenBISLabelStudio
 
         private void txtTypeFilter_TextChanged(object? sender, EventArgs e)
         {
-            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as TypeRowEntry)?.Code;
+            string? selectedRowCode = (dgvObjectTypes.CurrentRow?.Tag as ObjectTypeRowDto)?.Code;
             CommitGridEdits();
             SyncVisibleGridToMaster();
             RefreshObjectTypeGrid(selectedRowCode);
@@ -1648,7 +1503,7 @@ namespace OpenBISLabelStudio
             }
 
             DataGridViewRow row = dgvObjectTypes.Rows[e.RowIndex];
-            if (row.Tag is not TypeRowEntry entry)
+            if (row.Tag is not ObjectTypeRowDto entry)
             {
                 return;
             }
@@ -1680,9 +1535,9 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            if (dgvObjectTypes.CurrentRow?.Tag is TypeRowEntry entry
+            if (dgvObjectTypes.CurrentRow?.Tag is ObjectTypeRowDto entry
                 && IsHandleCreated
-                && _currentStep == Models.SetupWizardStep.ObjectTypes
+                && _currentStep == SetupWizardStep.ObjectTypes
                 && entry.TemplateProfile != _activePreviewProfile)
             {
                 ShowExamplePreviews(entry.TemplateProfile);
@@ -1696,12 +1551,12 @@ namespace OpenBISLabelStudio
 
         private void btnPreviewMolecule_Click(object? sender, EventArgs e)
         {
-            ShowExamplePreviews(Models.LabelTemplateProfile.Molecule);
+            ShowExamplePreviews(LabelTemplateProfile.Molecule);
         }
 
         private void btnPreviewGeneric_Click(object? sender, EventArgs e)
         {
-            ShowExamplePreviews(Models.LabelTemplateProfile.Generic);
+            ShowExamplePreviews(LabelTemplateProfile.Generic);
         }
     }
 }

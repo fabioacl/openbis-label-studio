@@ -1,15 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Printing;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using OpenBISLabelStudio.Backend.Contracts;
 using OpenBISLabelStudio.Models;
-using OpenBISLabelStudio.Services;
 
 namespace OpenBISLabelStudio
 {
@@ -17,23 +16,26 @@ namespace OpenBISLabelStudio
     {
         private const string PLACEHOLDER_TYPE = "Select an object type...";
 
-        private readonly AppConfigService _configService;
-        private readonly OpenBisClient _openBisClient;
-        private readonly LabelPreviewRenderer _previewRenderer;
-        private readonly Func<IReadOnlyList<string>>? _installedPrintersProvider;
+        private readonly ILabelStudioBackend _backend;
+        private readonly bool _ownsBackend;
+        private readonly FormTokenRecoveryPrompter _recoveryPrompter;
         private readonly ToolTip _statusToolTip = new ToolTip();
 
-        private AppConfig _config = new AppConfig();
-        private List<ConfiguredOpenBisType> _configuredTypes = new List<ConfiguredOpenBisType>();
-        private PrinterConfig _printerConfig = new PrinterConfig();
-        private List<SampleDto> _loadedSamples = new List<SampleDto>();
-        private SampleDetailsDto? _currentSampleDetails;
+        private string _credentialFingerprint = "";
+        private LabelTemplateProfile _activeProfile = LabelTemplateProfile.Generic;
         private string _currentSelectedTypeCode = "";
+        private bool _hasLoadedSample;
+        private string _loadedSampleName = "";
+        private string _loadedSamplePermId = "";
+        private string _loadedSampleLabel = "";
+        private string _fallbackSmallBoxPrinter = "Brother PT-P700";
+        private string _fallbackMagnetPrinter = "Brother PT-P700 (Kopie 1)";
+        private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
-        private readonly TokenRecoveryCoordinator _tokenRecoveryCoordinator = new TokenRecoveryCoordinator();
         private readonly Dictionary<LabelTemplateType, long> _slotRenderVersions = new Dictionary<LabelTemplateType, long>();
         private readonly Dictionary<LabelTemplateType, CancellationTokenSource> _slotPreviewCts = new Dictionary<LabelTemplateType, CancellationTokenSource>();
+        private CancellationTokenSource? _sampleLoadPreviewCts;
         private long _typeRefreshRequestVersion;
         private long _typeSelectionRequestVersion;
         private long _sampleDetailsRequestVersion;
@@ -42,112 +44,113 @@ namespace OpenBISLabelStudio
         private string? _persistentNoticeTooltip;
 
         public Form1()
-            : this(new AppConfigService())
+            : this(new OpenBISLabelStudio.Backend.Services.LabelStudioBackend(), ownsBackend: true)
         {
         }
 
-        public Form1(
-            AppConfigService configService,
-            OpenBisClient? openBisClient = null,
-            LabelPreviewRenderer? previewRenderer = null,
-            Func<IReadOnlyList<string>>? installedPrintersProvider = null)
+        public Form1(ILabelStudioBackend backend)
+            : this(backend, ownsBackend: false)
         {
-            _configService = configService ?? throw new ArgumentNullException(nameof(configService));
-            _openBisClient = openBisClient ?? new OpenBisClient();
-            _previewRenderer = previewRenderer ?? new LabelPreviewRenderer(_configService);
-            _installedPrintersProvider = installedPrintersProvider;
+        }
+
+        private Form1(ILabelStudioBackend backend, bool ownsBackend)
+        {
+            _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+            _ownsBackend = ownsBackend;
+            _recoveryPrompter = new FormTokenRecoveryPrompter(this, _backend);
 
             InitializeComponent();
         }
 
         /// <summary>
-        /// Resolves the <see cref="LabelTemplateProfile"/> for the active openBIS type from
-        /// <paramref name="configuredTypes"/>, falling back to <paramref name="sampleDetailsType"/>
-        /// and defaulting to <see cref="LabelTemplateProfile.Generic"/>.
+        /// Safely decodes PNG bytes into an independent <see cref="Bitmap"/>, falling back to
+        /// <paramref name="fallbackFactory"/> or a blank placeholder bitmap if the payload is empty or corrupt.
         /// </summary>
-        public static LabelTemplateProfile ResolveTemplateProfile(
-            string? selectedTypeCode,
-            IReadOnlyList<ConfiguredOpenBisType>? configuredTypes,
-            string? sampleDetailsType)
+        public static Bitmap DecodePngBitmap(byte[]? pngBytes, Func<byte[]>? fallbackFactory = null)
         {
-            if (configuredTypes == null || configuredTypes.Count == 0)
+            if (TryDecodeBitmapFromBytes(pngBytes, out Bitmap? bitmap))
             {
-                return LabelTemplateProfile.Generic;
+                return bitmap!;
             }
 
-            if (TryFindConfiguredProfile(selectedTypeCode, configuredTypes, out LabelTemplateProfile profile))
+            if (fallbackFactory != null)
             {
-                return profile;
-            }
-
-            if (TryFindConfiguredProfile(sampleDetailsType, configuredTypes, out profile))
-            {
-                return profile;
-            }
-
-            return LabelTemplateProfile.Generic;
-        }
-
-        private static bool TryFindConfiguredProfile(
-            string? typeCode,
-            IReadOnlyList<ConfiguredOpenBisType> configuredTypes,
-            out LabelTemplateProfile profile)
-        {
-            string normalized = (typeCode ?? "").Trim();
-            if (!string.IsNullOrEmpty(normalized))
-            {
-                foreach (ConfiguredOpenBisType entry in configuredTypes)
+                try
                 {
-                    if (entry != null
-                        && !string.IsNullOrWhiteSpace(entry.Code)
-                        && string.Equals(entry.Code.Trim(), normalized, StringComparison.OrdinalIgnoreCase)
-                        && Enum.IsDefined(typeof(LabelTemplateProfile), entry.TemplateProfile))
+                    byte[]? fallbackBytes = fallbackFactory();
+                    if (TryDecodeBitmapFromBytes(fallbackBytes, out Bitmap? fallbackBitmap))
                     {
-                        profile = entry.TemplateProfile;
-                        return true;
+                        return fallbackBitmap!;
                     }
+                }
+                catch
+                {
+                    // Fall through to blank safe bitmap.
                 }
             }
 
-            profile = LabelTemplateProfile.Generic;
-            return false;
+            return CreateSafeBlankBitmap();
         }
 
-        /// <summary>
-        /// Returns <c>true</c> when <paramref name="currentConfig"/> holds a non-empty token and either
-        /// its URL or token changed compared to the credentials captured for an in-flight request.
-        /// </summary>
-        public static bool CredentialsChangedSinceRequest(string? requestUrl, string? requestToken, AppConfig? currentConfig)
+        private static bool TryDecodeBitmapFromBytes(byte[]? pngBytes, out Bitmap? bitmap)
         {
-            return currentConfig != null
-                   && !string.IsNullOrWhiteSpace(currentConfig.Token)
-                   && (!string.Equals(currentConfig.Token, requestToken, StringComparison.Ordinal)
-                       || !string.Equals(currentConfig.OpenBisUrl, requestUrl, StringComparison.Ordinal));
+            bitmap = null;
+            if (pngBytes == null || pngBytes.Length == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                using var ms = new MemoryStream(pngBytes);
+                using var decoded = Image.FromStream(ms, useEmbeddedColorManagement: false, validateImageData: true);
+                bitmap = new Bitmap(decoded);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Bitmap CreateSafeBlankBitmap()
+        {
+            var bmp = new Bitmap(240, 80, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using Graphics g = Graphics.FromImage(bmp);
+            g.Clear(Color.White);
+            return bmp;
         }
 
         partial void DisposeManagedResources()
         {
+            CancelPendingSampleLoad();
             CancelAllSlotPreviewRenders();
             SetPictureBoxImage(smallBoxLabelPreview, null);
             SetPictureBoxImage(magnetLabelPreview, null);
             SetPictureBoxImage(flaskLabelPreview, null);
             _statusToolTip.Dispose();
+
+            if (_ownsBackend)
+            {
+                _backend.Dispose();
+            }
         }
 
         private async void Form1_Load(object sender, EventArgs e)
         {
-            IReadOnlyList<OpenBisTypeInfoDto>? cachedWizardServerTypes = null;
-            SetupWizardStep missingStep = _configService.GetFirstMissingWizardStep();
+            bool wizardSyncedTypes = false;
+            WorkspaceStartupState startup = await _backend.InitializeWorkspaceAsync(_recoveryPrompter);
+            if (IsDisposed || Disposing)
+            {
+                return;
+            }
 
-            if (missingStep != SetupWizardStep.None)
+            if (startup.MissingWizardStep != SetupWizardStep.None)
             {
                 using var wizard = new SetupSettingsForm(
-                    _configService,
-                    _openBisClient,
-                    _previewRenderer,
+                    _backend,
                     SetupDialogMode.Wizard,
-                    missingStep,
-                    installedPrintersProvider: _installedPrintersProvider);
+                    startup.MissingWizardStep);
 
                 DialogResult wizardResult = wizard.ShowDialog(this);
                 if (IsDisposed || Disposing)
@@ -155,52 +158,69 @@ namespace OpenBISLabelStudio
                     return;
                 }
 
-                if (wizardResult != DialogResult.OK && _configService.GetFirstMissingWizardStep() != SetupWizardStep.None)
+                wizardSyncedTypes = wizard.TypesSyncedFromServer;
+                startup = await _backend.InitializeWorkspaceAsync(_recoveryPrompter);
+                if (IsDisposed || Disposing)
+                {
+                    return;
+                }
+
+                if (wizardResult != DialogResult.OK && startup.MissingWizardStep != SetupWizardStep.None)
                 {
                     BeginInvoke(new Action(Close));
                     return;
                 }
-
-                cachedWizardServerTypes = wizard.CachedServerTypes;
             }
 
-            ReloadConfiguredStateFromDisk();
-            PopulateInstalledPrinters();
-            PopulateOpenBisTypeComboBox(preferredTypeCode: null);
-            UpdateFreeTextControlsState();
-            _previewRenderer.WarmUpWorkerInBackground();
+            ApplyWorkspaceStartupState(startup, preferredTypeCode: null);
+            _backend.WarmUpInBackground();
 
-            if (cachedWizardServerTypes != null)
+            if (wizardSyncedTypes)
             {
                 ClearStatusNotice();
-                ApplyServerTypeDescriptions(cachedWizardServerTypes);
                 return;
             }
 
-            await RefreshTypeDescriptionsFromServerAsync();
+            await RefreshWorkspaceTypesAsync();
         }
 
-        private void ReloadConfiguredStateFromDisk()
+        private void ApplyWorkspaceStartupState(WorkspaceStartupState startup, string? preferredTypeCode)
         {
-            _config = _configService.LoadAppConfig() ?? new AppConfig();
-            _configuredTypes = _configService.LoadConfiguredTypes();
-            _printerConfig = _configService.LoadPrinterConfig() ?? AppConfigService.CreateDefaultPrinterConfig();
+            _credentialFingerprint = startup.CredentialFingerprint ?? "";
+            PopulateInstalledPrinters(startup.Printers);
+            PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode);
+            UpdateFreeTextControlsState();
+
+            if (!string.IsNullOrWhiteSpace(startup.NoticeMessage))
+            {
+                ShowStatusNotice(startup.NoticeMessage);
+            }
         }
 
-        private void PopulateInstalledPrinters()
+        private void PopulateInstalledPrinters(PrinterDropdownState? printersState)
         {
             _isPopulatingPrinters = true;
             try
             {
-                IReadOnlyList<string> rawPrinters = _installedPrintersProvider != null
-                    ? _installedPrintersProvider()
-                    : GetSystemInstalledPrinters();
+                PrinterDropdownState printers = printersState ?? new PrinterDropdownState();
 
-                (List<string> printers, _) = AppConfigService.ResolveBrotherPrinterDropdownItems(rawPrinters, _printerConfig);
+                _fallbackSmallBoxPrinter = string.IsNullOrWhiteSpace(printers.SmallBoxPrinter)
+                    ? "Brother PT-P700"
+                    : printers.SmallBoxPrinter.Trim();
+                _fallbackMagnetPrinter = string.IsNullOrWhiteSpace(printers.MagnetPrinter)
+                    ? "Brother PT-P700 (Kopie 1)"
+                    : printers.MagnetPrinter.Trim();
+                _fallbackFlaskPrinter = string.IsNullOrWhiteSpace(printers.FlaskPrinter)
+                    ? "Brother PT-P700 (Kopie 2)"
+                    : printers.FlaskPrinter.Trim();
 
-                PopulatePrinterCombo(smallBoxPrinterComboBox, printers, _printerConfig.SmallBoxPrinter);
-                PopulatePrinterCombo(magnetPrinterComboBox, printers, _printerConfig.MagnetPrinter);
-                PopulatePrinterCombo(flaskPrinterComboBox, printers, _printerConfig.FlaskPrinter);
+                PopulatePrinterCombo(smallBoxPrinterComboBox, printers.AvailablePrinters, printers.SmallBoxSelectedIndex, _fallbackSmallBoxPrinter);
+                PopulatePrinterCombo(magnetPrinterComboBox, printers.AvailablePrinters, printers.MagnetSelectedIndex, _fallbackMagnetPrinter);
+                PopulatePrinterCombo(flaskPrinterComboBox, printers.AvailablePrinters, printers.FlaskSelectedIndex, _fallbackFlaskPrinter);
+
+                _fallbackSmallBoxPrinter = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _fallbackSmallBoxPrinter;
+                _fallbackMagnetPrinter = magnetPrinterComboBox.SelectedItem?.ToString() ?? _fallbackMagnetPrinter;
+                _fallbackFlaskPrinter = flaskPrinterComboBox.SelectedItem?.ToString() ?? _fallbackFlaskPrinter;
             }
             finally
             {
@@ -208,99 +228,111 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private static IReadOnlyList<string> GetSystemInstalledPrinters()
+        private static void PopulatePrinterCombo(
+            ComboBox comboBox,
+            IReadOnlyList<string>? printers,
+            int preferredIndex,
+            string preferredName)
         {
-            try
+            comboBox.Items.Clear();
+            if (printers != null)
             {
-                var printers = new List<string>();
-                foreach (string printer in PrinterSettings.InstalledPrinters)
+                foreach (string printer in printers)
                 {
                     if (!string.IsNullOrWhiteSpace(printer))
                     {
-                        printers.Add(printer);
+                        comboBox.Items.Add(printer);
                     }
                 }
+            }
 
-                return printers;
-            }
-            catch
+            if (comboBox.Items.Count == 0)
             {
-                return Array.Empty<string>();
+                return;
             }
+
+            if (preferredIndex >= 0 && preferredIndex < comboBox.Items.Count)
+            {
+                comboBox.SelectedIndex = preferredIndex;
+                return;
+            }
+
+            int matchedIndex = 0;
+            for (int i = 0; i < comboBox.Items.Count; i++)
+            {
+                if (string.Equals(comboBox.Items[i]?.ToString(), preferredName, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchedIndex = i;
+                    break;
+                }
+            }
+
+            comboBox.SelectedIndex = matchedIndex;
         }
 
-        private static void PopulatePrinterCombo(ComboBox comboBox, IReadOnlyList<string> printers, string preferredName)
-        {
-            comboBox.Items.Clear();
-            foreach (string printer in printers)
-            {
-                comboBox.Items.Add(printer);
-            }
-
-            if (comboBox.Items.Count > 0)
-            {
-                int index = AppConfigService.FindBestPrinterIndex(printers, preferredName);
-                comboBox.SelectedIndex = index >= 0 && index < comboBox.Items.Count ? index : 0;
-            }
-        }
-
-        private void PrinterComboBox_SelectedIndexChanged(object? sender, EventArgs e)
+        private async void PrinterComboBox_SelectedIndexChanged(object? sender, EventArgs e)
         {
             if (_isPopulatingPrinters)
             {
                 return;
             }
 
-            string smallBox = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.SmallBoxPrinter;
-            string magnet = magnetPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.MagnetPrinter;
-            string flask = flaskPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.FlaskPrinter;
+            string smallBox = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _fallbackSmallBoxPrinter;
+            string magnet = magnetPrinterComboBox.SelectedItem?.ToString() ?? _fallbackMagnetPrinter;
+            string flask = flaskPrinterComboBox.SelectedItem?.ToString() ?? _fallbackFlaskPrinter;
 
-            if (string.Equals(_printerConfig.SmallBoxPrinter, smallBox, StringComparison.Ordinal)
-                && string.Equals(_printerConfig.MagnetPrinter, magnet, StringComparison.Ordinal)
-                && string.Equals(_printerConfig.FlaskPrinter, flask, StringComparison.Ordinal))
+            if (string.Equals(_fallbackSmallBoxPrinter, smallBox, StringComparison.Ordinal)
+                && string.Equals(_fallbackMagnetPrinter, magnet, StringComparison.Ordinal)
+                && string.Equals(_fallbackFlaskPrinter, flask, StringComparison.Ordinal))
             {
                 return;
             }
 
-            _printerConfig.SmallBoxPrinter = smallBox;
-            _printerConfig.MagnetPrinter = magnet;
-            _printerConfig.FlaskPrinter = flask;
+            _fallbackSmallBoxPrinter = smallBox;
+            _fallbackMagnetPrinter = magnet;
+            _fallbackFlaskPrinter = flask;
 
             try
             {
-                _configService.SavePrinterConfig(_printerConfig);
+                OperationResult result = await _backend.UpdatePrinterSelectionsAsync(smallBox, magnet, flask);
+                if (!IsDisposed && !Disposing && !result.Success)
+                {
+                    ShowStatusNotice(result.ErrorMessage, result.ErrorMessage);
+                }
             }
             catch (Exception ex)
             {
-                ShowStatusNotice($"Could not save printer selection: {ex.Message}", ex.Message);
+                if (!IsDisposed && !Disposing)
+                {
+                    ShowStatusNotice($"Could not save printer selection: {ex.Message}", ex.Message);
+                }
             }
         }
 
-        private void PopulateOpenBisTypeComboBox(string? preferredTypeCode)
+        private void PopulateOpenBisTypeComboBox(IReadOnlyList<TypeOptionDto>? configuredTypes, string? preferredTypeCode)
         {
             _isPopulatingTypes = true;
             try
             {
-                List<OpenBisTypeItem> typeItems = _configuredTypes
+                List<TypeOptionDto> typeItems = (configuredTypes ?? Array.Empty<TypeOptionDto>())
                     .Where(t => t != null && !string.IsNullOrWhiteSpace(t.Code))
-                    .Select(t =>
+                    .Select(t => new TypeOptionDto
                     {
-                        string cleanCode = t.Code.Trim();
-                        string displayText = string.IsNullOrWhiteSpace(t.DisplayName)
-                            ? AppConfigService.FormatFriendlyName(cleanCode)
-                            : t.DisplayName.Trim();
-                        return new OpenBisTypeItem
-                        {
-                            Code = cleanCode,
-                            DisplayText = displayText,
-                            TemplateProfile = t.TemplateProfile
-                        };
+                        Code = t.Code.Trim(),
+                        DisplayText = string.IsNullOrWhiteSpace(t.DisplayText) ? t.Code.Trim() : t.DisplayText.Trim(),
+                        TemplateProfile = t.TemplateProfile
                     })
                     .OrderBy(t => t.DisplayText, StringComparer.CurrentCultureIgnoreCase)
+                    .ThenBy(t => t.Code, StringComparer.CurrentCultureIgnoreCase)
                     .ToList();
 
                 openbisTypeComboBox.Items.Clear();
-                openbisTypeComboBox.Items.Add(new OpenBisTypeItem { Code = "", DisplayText = PLACEHOLDER_TYPE });
+                openbisTypeComboBox.Items.Add(new TypeOptionDto
+                {
+                    Code = "",
+                    DisplayText = PLACEHOLDER_TYPE,
+                    TemplateProfile = LabelTemplateProfile.Generic
+                });
 
                 int matchedIndex = 0;
                 for (int i = 0; i < typeItems.Count; i++)
@@ -314,14 +346,16 @@ namespace OpenBISLabelStudio
                 }
 
                 openbisTypeComboBox.SelectedIndex = matchedIndex;
-                if (matchedIndex > 0 && openbisTypeComboBox.SelectedItem is OpenBisTypeItem activeItem)
+                if (matchedIndex > 0 && openbisTypeComboBox.SelectedItem is TypeOptionDto activeItem)
                 {
                     _currentSelectedTypeCode = activeItem.Code;
+                    _activeProfile = activeItem.TemplateProfile;
                     selectedOpenbisTypeLabel.Text = $"{activeItem.DisplayText}:";
                 }
                 else
                 {
                     _currentSelectedTypeCode = "";
+                    _activeProfile = LabelTemplateProfile.Generic;
                     selectedOpenbisTypeLabel.Text = "Type:";
                 }
             }
@@ -331,215 +365,42 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private async Task RefreshTypeDescriptionsFromServerAsync()
+        private async Task RefreshWorkspaceTypesAsync()
         {
             long requestVersion = ++_typeRefreshRequestVersion;
 
-            if (string.IsNullOrWhiteSpace(_config.OpenBisUrl) || string.IsNullOrWhiteSpace(_config.Token))
+            BackgroundTypeRefreshResult refresh = await _backend.RefreshWorkspaceTypesAsync(_recoveryPrompter);
+            if (IsDisposed || Disposing || requestVersion != _typeRefreshRequestVersion)
             {
                 return;
             }
 
-            (bool shouldProceed, bool attemptedRecovery, OpenBisTypesResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
-                (url, token) => _openBisClient.QueryTypesAsync(url, token),
-                r => r.Success,
-                r => r.ErrorType,
-                r => r.Error,
-                () => requestVersion != _typeRefreshRequestVersion,
-                "openBIS token expired or invalid — showing cached object types. Click Settings... to update credentials.");
-
-            if (!shouldProceed || result == null)
+            if (refresh.Skipped)
             {
                 return;
             }
 
-            if (!result.Success)
+            if (!refresh.Success)
             {
-                string errDetail = FormatOpenBisError(result.Error, attemptedRecovery
-                    ? "Could not refresh openBIS object types."
-                    : "Could not connect to openBIS.");
-                string banner = attemptedRecovery
-                    ? $"Offline mode: showing cached object types ({errDetail})"
-                    : string.Equals(result.ErrorType, "connection_error", StringComparison.OrdinalIgnoreCase)
-                        ? $"Offline mode: could not reach openBIS — showing cached object types. ({errDetail})"
-                        : $"Notice: could not refresh openBIS object types — showing cached object types. ({errDetail})";
-                ShowStatusNotice(banner, errDetail);
+                if (!string.IsNullOrWhiteSpace(refresh.NoticeMessage))
+                {
+                    ShowStatusNotice(refresh.NoticeMessage, refresh.NoticeTooltip);
+                }
+
                 return;
             }
 
             ClearStatusNotice();
-            if (result.Types != null)
+            if (refresh.TypesUpdated)
             {
-                ApplyServerTypeDescriptions(result.Types);
+                PopulateOpenBisTypeComboBox(refresh.ConfiguredTypes, _currentSelectedTypeCode);
+                UpdateFreeTextControlsState();
             }
-        }
-
-        private async Task<(bool ShouldProceed, bool AttemptedRecovery, TResult? Result)> ExecuteWithExpiredTokenRecoveryAsync<TResult>(
-            Func<string, string, Task<TResult>> queryAsync,
-            Func<TResult, bool> isSuccess,
-            Func<TResult, string?> getErrorType,
-            Func<TResult, string?> getError,
-            Func<bool> isVersionStale,
-            string cancelledStatusNotice)
-        {
-            bool IsStale() => IsDisposed || Disposing || isVersionStale();
-
-            string requestUrl = _config.OpenBisUrl;
-            string requestToken = _config.Token;
-
-            TResult result = await queryAsync(requestUrl, requestToken);
-            if (IsStale())
-            {
-                return (false, false, default);
-            }
-
-            if (!isSuccess(result) && IsTokenExpiredError(getErrorType(result))
-                && CredentialsChangedSinceRequest(requestUrl, requestToken, _config))
-            {
-                requestUrl = _config.OpenBisUrl;
-                requestToken = _config.Token;
-                result = await queryAsync(requestUrl, requestToken);
-                if (IsStale())
-                {
-                    return (false, false, default);
-                }
-            }
-
-            bool attemptedRecovery = false;
-            if (!isSuccess(result) && IsTokenExpiredError(getErrorType(result)))
-            {
-                attemptedRecovery = true;
-                string? expiredError = getError(result);
-                if (!await TryRecoverExpiredTokenAsync(expiredError))
-                {
-                    if (!IsStale())
-                    {
-                        ShowStatusNotice(cancelledStatusNotice, expiredError);
-                    }
-
-                    return (false, true, default);
-                }
-
-                if (IsStale())
-                {
-                    return (false, true, default);
-                }
-
-                result = await queryAsync(_config.OpenBisUrl, _config.Token);
-                if (IsStale())
-                {
-                    return (false, true, default);
-                }
-            }
-
-            return (true, attemptedRecovery, result);
-        }
-
-        private static bool IsTokenExpiredError(string? errorType)
-        {
-            return string.Equals(errorType, "token_expired", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private void ApplyServerTypeDescriptions(IReadOnlyList<OpenBisTypeInfoDto> serverTypes)
-        {
-            var descriptionsByCode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (OpenBisTypeInfoDto serverType in serverTypes)
-            {
-                if (serverType != null
-                    && !string.IsNullOrWhiteSpace(serverType.Code)
-                    && !string.IsNullOrWhiteSpace(serverType.Description))
-                {
-                    descriptionsByCode[serverType.Code.Trim()] = serverType.Description.Trim();
-                }
-            }
-
-            bool anyChanged = false;
-            foreach (ConfiguredOpenBisType configured in _configuredTypes)
-            {
-                if (configured == null || string.IsNullOrWhiteSpace(configured.Code))
-                {
-                    continue;
-                }
-
-                if (descriptionsByCode.TryGetValue(configured.Code.Trim(), out string? desc)
-                    && !string.Equals(configured.DisplayName, desc, StringComparison.Ordinal))
-                {
-                    configured.DisplayName = desc;
-                    anyChanged = true;
-                }
-            }
-
-            if (!anyChanged)
-            {
-                return;
-            }
-
-            try
-            {
-                _configService.SaveConfiguredTypes(_configuredTypes);
-            }
-            catch
-            {
-                // Ignore best-effort displayName cache persistence failure.
-            }
-
-            PopulateOpenBisTypeComboBox(_currentSelectedTypeCode);
-        }
-
-        private Task<bool> TryRecoverExpiredTokenAsync(string? errorDetail)
-        {
-            if (IsDisposed || Disposing)
-            {
-                return Task.FromResult(false);
-            }
-
-            return _tokenRecoveryCoordinator.RecoverAsync(() => Task.FromResult(ShowExpiredTokenRecoveryDialog(errorDetail)));
-        }
-
-        private bool ShowExpiredTokenRecoveryDialog(string? errorDetail)
-        {
-            if (IsDisposed || Disposing)
-            {
-                return false;
-            }
-
-            string warning = string.IsNullOrWhiteSpace(errorDetail)
-                ? "Your openBIS personal access token has expired or is invalid. Please enter a new token."
-                : $"Your openBIS personal access token has expired or is invalid ({errorDetail.Trim()}). Please enter a new token.";
-
-            using var recoveryForm = new SetupSettingsForm(
-                _configService,
-                _openBisClient,
-                _previewRenderer,
-                SetupDialogMode.ExpiredTokenRecovery,
-                SetupWizardStep.Connection,
-                initialWarning: warning,
-                installedPrintersProvider: _installedPrintersProvider);
-
-            DialogResult result = recoveryForm.ShowDialog(this);
-            if (IsDisposed || Disposing || result != DialogResult.OK)
-            {
-                return false;
-            }
-
-            AppConfig? updatedConfig = _configService.LoadAppConfig();
-            if (updatedConfig != null)
-            {
-                _config = updatedConfig;
-            }
-
-            ClearStatusNotice();
-            return true;
-        }
-
-        private LabelTemplateProfile GetActiveTemplateProfile()
-        {
-            return ResolveTemplateProfile(_currentSelectedTypeCode, _configuredTypes, _currentSampleDetails?.SampleType);
         }
 
         private void UpdateFreeTextControlsState()
         {
-            bool isMoleculeProfile = GetActiveTemplateProfile() == LabelTemplateProfile.Molecule;
+            bool isMoleculeProfile = _activeProfile == LabelTemplateProfile.Molecule;
             bool hasSelection = !string.IsNullOrEmpty(_currentSelectedTypeCode);
 
             // FreeText is applicable only for Generic / Free-text template profile
@@ -560,20 +421,26 @@ namespace OpenBISLabelStudio
 
         private async void openbisTypeComboBox_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (_isPopulatingTypes || openbisTypeComboBox.SelectedItem is not OpenBisTypeItem selectedItem)
+            if (_isPopulatingTypes || openbisTypeComboBox.SelectedItem is not TypeOptionDto selectedItem)
             {
                 return;
             }
 
-            if (string.IsNullOrEmpty(selectedItem.Code) || selectedItem.DisplayText == PLACEHOLDER_TYPE)
+            if (string.IsNullOrWhiteSpace(selectedItem.Code) || selectedItem.DisplayText == PLACEHOLDER_TYPE)
             {
                 ++_typeSelectionRequestVersion;
                 ++_sampleDetailsRequestVersion;
+                CancelPendingSampleLoad();
                 SetSampleQueryControlsEnabled(true);
                 selectedOpenbisTypeLabel.Text = "Type:";
                 openbisObjectsComboBox.Items.Clear();
-                _loadedSamples.Clear();
                 _currentSelectedTypeCode = "";
+                _activeProfile = LabelTemplateProfile.Generic;
+                _hasLoadedSample = false;
+                _loadedSampleName = "";
+                _loadedSamplePermId = "";
+                _loadedSampleLabel = "";
+                _backend.ClearActiveSample();
                 ClearAllPreviews();
                 UpdateFreeTextControlsState();
                 ClearLoadingFeedback();
@@ -582,20 +449,20 @@ namespace OpenBISLabelStudio
 
             long requestVersion = ++_typeSelectionRequestVersion;
             ++_sampleDetailsRequestVersion;
+            CancelPendingSampleLoad();
+
             _currentSelectedTypeCode = selectedItem.Code;
+            _activeProfile = selectedItem.TemplateProfile;
+            _hasLoadedSample = false;
+            _loadedSampleName = "";
+            _loadedSamplePermId = "";
+            _loadedSampleLabel = "";
+            _backend.ClearActiveSample();
+
             selectedOpenbisTypeLabel.Text = $"{selectedItem.DisplayText}:";
             openbisObjectsComboBox.Items.Clear();
-            _loadedSamples.Clear();
             ClearAllPreviews();
             UpdateFreeTextControlsState();
-
-            if (string.IsNullOrWhiteSpace(_config.OpenBisUrl))
-            {
-                SetSampleQueryControlsEnabled(true);
-                ClearLoadingFeedback();
-                MessageBox.Show("openBIS URL is missing. Please configure it in Settings...", "Configuration Missing", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
 
             // Allow switching object types or opening Settings even while items for a previous selection load.
             SetSampleQueryControlsEnabled(false);
@@ -603,27 +470,43 @@ namespace OpenBISLabelStudio
 
             try
             {
-                (bool shouldProceed, _, OpenBisListResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
-                    (url, token) => _openBisClient.QuerySamplesByTypeAsync(url, token, selectedItem.Code),
-                    r => r.Success,
-                    r => r.ErrorType,
-                    r => r.Error,
-                    () => requestVersion != _typeSelectionRequestVersion,
-                    "openBIS token expired or invalid — click Settings... to update credentials.");
-
-                if (!shouldProceed || result == null)
+                SampleListResultDto result = await _backend.LoadObjectsForTypeAsync(selectedItem.Code, _recoveryPrompter);
+                if (IsDisposed || Disposing || requestVersion != _typeSelectionRequestVersion)
                 {
                     return;
                 }
 
-                if (result.Success && result.Data != null)
+                if (result.WasCancelled)
+                {
+                    if (!string.IsNullOrWhiteSpace(result.NoticeMessage))
+                    {
+                        ShowStatusNotice(result.NoticeMessage, result.NoticeTooltip);
+                    }
+
+                    return;
+                }
+
+                if (result.IsMissingConfiguration)
+                {
+                    MessageBox.Show(
+                        string.IsNullOrWhiteSpace(result.ErrorMessage)
+                            ? "openBIS URL is missing. Please configure it in Settings..."
+                            : result.ErrorMessage,
+                        "Configuration Missing",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (result.Success)
                 {
                     ClearStatusNotice();
-                    _loadedSamples = result.Data;
-
-                    foreach (SampleDto sample in result.Data)
+                    foreach (SampleSummaryDto sample in result.Samples)
                     {
-                        openbisObjectsComboBox.Items.Add($"{sample.Name} ({sample.PermId})");
+                        if (sample != null)
+                        {
+                            openbisObjectsComboBox.Items.Add(sample);
+                        }
                     }
 
                     if (openbisObjectsComboBox.Items.Count > 0)
@@ -634,7 +517,9 @@ namespace OpenBISLabelStudio
                 else
                 {
                     MessageBox.Show(
-                        FormatOpenBisError(result.Error, "Failed to fetch items from openBIS."),
+                        string.IsNullOrWhiteSpace(result.ErrorMessage)
+                            ? "Failed to fetch items from openBIS."
+                            : result.ErrorMessage,
                         "openBIS Fetch Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
@@ -655,62 +540,147 @@ namespace OpenBISLabelStudio
         // =========================================================================
         private async void loadPrintTemplates_Click(object sender, EventArgs e)
         {
-            if (openbisObjectsComboBox.SelectedIndex < 0 || openbisObjectsComboBox.SelectedIndex >= _loadedSamples.Count)
+            if (openbisObjectsComboBox.SelectedItem is not SampleSummaryDto selectedSample)
             {
                 MessageBox.Show("Please select an openBIS object first.", "Selection Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            SampleDto selectedSample = _loadedSamples[openbisObjectsComboBox.SelectedIndex];
+            await LoadAndStreamSamplePreviewsAsync(
+                _currentSelectedTypeCode,
+                selectedSample.PermId,
+                selectedSample.Name);
+        }
+
+        private async Task LoadAndStreamSamplePreviewsAsync(string typeCode, string permId, string sampleName)
+        {
             long requestVersion = ++_sampleDetailsRequestVersion;
-            bool skipElnPreview = ResolveTemplateProfile(_currentSelectedTypeCode, _configuredTypes, null) == LabelTemplateProfile.Generic;
+            CancelPendingSampleLoad();
+            CancelAllSlotPreviewRenders();
+
+            _hasLoadedSample = false;
+            _loadedSampleName = "";
+            _loadedSamplePermId = "";
+            _loadedSampleLabel = "";
+            _backend.ClearActiveSample();
+
+            var cts = new CancellationTokenSource();
+            _sampleLoadPreviewCts = cts;
+            CancellationToken ct = cts.Token;
+
+            LabelTemplateProfile initialProfile = _activeProfile;
+            string magnetFreeText = initialProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : "";
+            string flaskFreeText = initialProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : "";
+
+            var slotVersions = new Dictionary<LabelTemplateType, long>();
+            foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+            {
+                slotVersions[slot] = NextSlotRenderVersion(slot);
+                SetPictureBoxImage(
+                    GetSlotPictureBox(slot),
+                    DecodeSlotPreview(slot, initialProfile, _backend.GetLoadingPreviewPng(slot, initialProfile)));
+            }
 
             // Allow switching object types or opening Settings even while items for a previous selection load.
             SetSampleQueryControlsEnabled(false);
-            SetLoadingFeedback($"Loading details for {selectedSample.Name}...");
+            SetLoadingFeedback($"Loading details and previews for {sampleName}...");
+
+            var appliedSlots = new HashSet<LabelTemplateType>();
 
             try
             {
-                (bool shouldProceed, _, OpenBisDetailsResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
-                    (url, token) => _openBisClient.QuerySampleDetailsAsync(url, token, selectedSample.PermId, skipElnPreview),
-                    r => r.Success,
-                    r => r.ErrorType,
-                    r => r.Error,
-                    () => requestVersion != _sampleDetailsRequestVersion,
-                    "openBIS token expired or invalid — click Settings... to update credentials.");
+                SamplePreviewBundleDto bundle = await _backend.LoadSamplePreviewsAsync(
+                    typeCode,
+                    permId,
+                    magnetFreeText,
+                    flaskFreeText,
+                    onSlotReady: (slot, pngBytes) => MarshalLoadedSlotReady(
+                        slot,
+                        pngBytes,
+                        requestVersion,
+                        slotVersions,
+                        appliedSlots,
+                        initialProfile,
+                        ct),
+                    recoveryPrompter: _recoveryPrompter,
+                    ct: ct);
 
-                if (!shouldProceed || result == null)
+                if (IsDisposed || Disposing || requestVersion != _sampleDetailsRequestVersion)
                 {
                     return;
                 }
 
-                if (result.Success && result.Details != null)
+                if (bundle.WasCancelled)
                 {
-                    ClearStatusNotice();
-                    _currentSampleDetails = result.Details;
-                    LabelTemplateProfile activeProfile = GetActiveTemplateProfile();
-                    UpdateFreeTextControlsState();
+                    ClearSlotPreviewImages();
+                    if (!string.IsNullOrWhiteSpace(bundle.NoticeMessage))
+                    {
+                        ShowStatusNotice(bundle.NoticeMessage, bundle.NoticeTooltip);
+                    }
 
-                    // Automatically check all preview checkboxes for convenience
-                    smallBoxLabelCheckBox.Checked = true;
-                    magnetLabelCheckBox.Checked = true;
-                    flaskLabelCheckBox.Checked = true;
-
-                    SetSampleQueryControlsEnabled(true);
-                    SetLoadingFeedback("Rendering label previews...");
-                    await RenderAllSlotPreviewsAsync(activeProfile, _currentSampleDetails);
+                    return;
                 }
-                else
+
+                if (!bundle.Success)
                 {
+                    ClearSlotPreviewImages();
                     MessageBox.Show(
-                        FormatOpenBisError(result.Error, "Could not fetch sample details."),
+                        string.IsNullOrWhiteSpace(bundle.ErrorMessage)
+                            ? "Could not fetch sample details."
+                            : bundle.ErrorMessage,
                         "openBIS Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
+                    return;
+                }
+
+                ClearStatusNotice();
+                _hasLoadedSample = true;
+                _activeProfile = bundle.Profile;
+                _loadedSampleName = string.IsNullOrWhiteSpace(bundle.SampleName) ? sampleName : bundle.SampleName;
+                _loadedSamplePermId = string.IsNullOrWhiteSpace(bundle.PermId) ? permId : bundle.PermId;
+                _loadedSampleLabel = string.IsNullOrWhiteSpace(_loadedSampleName)
+                    ? _loadedSamplePermId
+                    : $"{_loadedSampleName} ({_loadedSamplePermId})";
+
+                UpdateFreeTextControlsState();
+
+                // Automatically check all preview checkboxes for convenience
+                smallBoxLabelCheckBox.Checked = true;
+                magnetLabelCheckBox.Checked = true;
+                flaskLabelCheckBox.Checked = true;
+
+                foreach (KeyValuePair<LabelTemplateType, byte[]> kvp in bundle.SlotPreviews)
+                {
+                    if (appliedSlots.Add(kvp.Key))
+                    {
+                        SetPictureBoxImage(
+                            GetSlotPictureBox(kvp.Key),
+                            DecodeSlotPreview(kvp.Key, _activeProfile, kvp.Value));
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Ignored when a newer type/sample selection supersedes this request.
+            }
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing && requestVersion == _sampleDetailsRequestVersion)
+                {
+                    ClearSlotPreviewImages();
+                    MessageBox.Show($"Could not fetch sample details: {ex.Message}", "openBIS Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             finally
             {
+                if (ReferenceEquals(_sampleLoadPreviewCts, cts))
+                {
+                    _sampleLoadPreviewCts = null;
+                }
+
+                cts.Dispose();
+
                 if (!IsDisposed && !Disposing && requestVersion == _sampleDetailsRequestVersion)
                 {
                     ClearLoadingFeedback();
@@ -719,18 +689,71 @@ namespace OpenBISLabelStudio
             }
         }
 
+        private void MarshalLoadedSlotReady(
+            LabelTemplateType slot,
+            byte[] pngBytes,
+            long requestVersion,
+            Dictionary<LabelTemplateType, long> slotVersions,
+            HashSet<LabelTemplateType> appliedSlots,
+            LabelTemplateProfile fallbackProfile,
+            CancellationToken ct)
+        {
+            if (IsDisposed || Disposing || ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                        MarshalLoadedSlotReady(slot, pngBytes, requestVersion, slotVersions, appliedSlots, fallbackProfile, ct)));
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Ignore callbacks arriving as form disposes.
+                }
+                catch (InvalidOperationException)
+                {
+                    // Ignore callbacks arriving after handle destruction.
+                }
+
+                return;
+            }
+
+            if (IsDisposed
+                || Disposing
+                || ct.IsCancellationRequested
+                || requestVersion != _sampleDetailsRequestVersion)
+            {
+                return;
+            }
+
+            if (!slotVersions.TryGetValue(slot, out long expectedSlotVersion)
+                || !IsCurrentSlotVersion(slot, expectedSlotVersion))
+            {
+                return;
+            }
+
+            if (appliedSlots.Add(slot))
+            {
+                SetPictureBoxImage(
+                    GetSlotPictureBox(slot),
+                    DecodeSlotPreview(slot, fallbackProfile, pngBytes));
+            }
+        }
+
         // =========================================================================
         // DYNAMIC FREE TEXT COMMIT HANDLERS (ON LEAVE OR ENTER)
         // =========================================================================
         private void magnetFreeTextBox_Leave(object sender, EventArgs e)
         {
-            if (_currentSampleDetails != null && GetActiveTemplateProfile() == LabelTemplateProfile.Generic)
+            if (_hasLoadedSample && _activeProfile == LabelTemplateProfile.Generic)
             {
-                RenderSlotPreview(
+                _ = RenderSlotFreeTextPreviewAsync(
                     magnetLabelPreview,
                     LabelTemplateType.Magnet12mm,
-                    LabelTemplateProfile.Generic,
-                    _currentSampleDetails,
                     magnetFreeTextBox.Text);
             }
         }
@@ -747,13 +770,11 @@ namespace OpenBISLabelStudio
 
         private void flaskFreeTextBox_Leave(object sender, EventArgs e)
         {
-            if (_currentSampleDetails != null && GetActiveTemplateProfile() == LabelTemplateProfile.Generic)
+            if (_hasLoadedSample && _activeProfile == LabelTemplateProfile.Generic)
             {
-                RenderSlotPreview(
+                _ = RenderSlotFreeTextPreviewAsync(
                     flaskLabelPreview,
                     LabelTemplateType.Flask24mm,
-                    LabelTemplateProfile.Generic,
-                    _currentSampleDetails,
                     flaskFreeTextBox.Text);
             }
         }
@@ -768,27 +789,9 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private void RenderAllSlotPreviews(LabelTemplateProfile profile, SampleDetailsDto details)
-        {
-            _ = RenderAllSlotPreviewsAsync(profile, details);
-        }
-
-        private Task RenderAllSlotPreviewsAsync(LabelTemplateProfile profile, SampleDetailsDto details)
-        {
-            string magnetFreeText = profile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : "";
-            string flaskFreeText = profile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : "";
-
-            return Task.WhenAll(
-                RenderSlotPreviewAsync(smallBoxLabelPreview, LabelTemplateType.SmallBox12mm, profile, details, ""),
-                RenderSlotPreviewAsync(magnetLabelPreview, LabelTemplateType.Magnet12mm, profile, details, magnetFreeText),
-                RenderSlotPreviewAsync(flaskLabelPreview, LabelTemplateType.Flask24mm, profile, details, flaskFreeText));
-        }
-
-        private async Task RenderSlotPreviewAsync(
+        private async Task RenderSlotFreeTextPreviewAsync(
             PictureBox picBox,
             LabelTemplateType slot,
-            LabelTemplateProfile profile,
-            SampleDetailsDto details,
             string freeText)
         {
             if (IsDisposed || Disposing)
@@ -796,34 +799,27 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            long slotVersion = (_slotRenderVersions.TryGetValue(slot, out long current) ? current : 0) + 1;
-            _slotRenderVersions[slot] = slotVersion;
+            long slotVersion = NextSlotRenderVersion(slot);
             CancelSlotPreviewRender(slot);
 
             var cts = new CancellationTokenSource();
             _slotPreviewCts[slot] = cts;
             CancellationToken cancellationToken = cts.Token;
+            LabelTemplateProfile profile = _activeProfile;
 
-            SetPictureBoxImage(picBox, LabelPreviewRenderer.CreateLoadingPreviewBitmap(slot, profile));
+            SetPictureBoxImage(
+                picBox,
+                DecodeSlotPreview(slot, profile, _backend.GetLoadingPreviewPng(slot, profile)));
 
             try
             {
-                Image previewImage = await _previewRenderer.RenderTemplatePreviewAsync(
-                    slot,
-                    profile,
-                    details,
-                    freeText,
-                    cancellationToken);
-
-                if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested
-                    || !_slotRenderVersions.TryGetValue(slot, out long activeVersion)
-                    || activeVersion != slotVersion)
+                byte[] pngBytes = await _backend.RenderSlotWithFreeTextAsync(slot, freeText, cancellationToken);
+                if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested || !IsCurrentSlotVersion(slot, slotVersion))
                 {
-                    previewImage.Dispose();
                     return;
                 }
 
-                SetPictureBoxImage(picBox, previewImage);
+                SetPictureBoxImage(picBox, DecodeSlotPreview(slot, profile, pngBytes));
             }
             catch (OperationCanceledException)
             {
@@ -831,25 +827,69 @@ namespace OpenBISLabelStudio
             }
             catch (Exception ex)
             {
-                if (!IsDisposed && !Disposing
-                    && _slotRenderVersions.TryGetValue(slot, out long activeVersion)
-                    && activeVersion == slotVersion)
+                if (!IsDisposed && !Disposing && IsCurrentSlotVersion(slot, slotVersion))
                 {
                     SetPictureBoxImage(
                         picBox,
-                        LabelPreviewRenderer.CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}"));
+                        DecodeSlotPreview(slot, profile, _backend.GetFallbackPreviewPng(slot, profile, $"Preview unavailable: {ex.Message}")));
                 }
+            }
+            finally
+            {
+                if (_slotPreviewCts.TryGetValue(slot, out CancellationTokenSource? tracked) && ReferenceEquals(tracked, cts))
+                {
+                    _slotPreviewCts.Remove(slot);
+                }
+
+                cts.Dispose();
             }
         }
 
-        private void RenderSlotPreview(
-            PictureBox picBox,
-            LabelTemplateType slot,
-            LabelTemplateProfile profile,
-            SampleDetailsDto details,
-            string freeText)
+        private Bitmap DecodeSlotPreview(LabelTemplateType slot, LabelTemplateProfile profile, byte[]? pngBytes)
         {
-            _ = RenderSlotPreviewAsync(picBox, slot, profile, details, freeText);
+            return DecodePngBitmap(
+                pngBytes,
+                () => _backend.GetFallbackPreviewPng(slot, profile, "Preview unavailable"));
+        }
+
+        private PictureBox GetSlotPictureBox(LabelTemplateType slot)
+        {
+            return slot switch
+            {
+                LabelTemplateType.SmallBox12mm => smallBoxLabelPreview,
+                LabelTemplateType.Magnet12mm => magnetLabelPreview,
+                LabelTemplateType.Flask24mm => flaskLabelPreview,
+                _ => smallBoxLabelPreview
+            };
+        }
+
+        private long NextSlotRenderVersion(LabelTemplateType slot)
+        {
+            long nextVersion = (_slotRenderVersions.TryGetValue(slot, out long current) ? current : 0) + 1;
+            _slotRenderVersions[slot] = nextVersion;
+            return nextVersion;
+        }
+
+        private bool IsCurrentSlotVersion(LabelTemplateType slot, long expectedVersion)
+        {
+            return _slotRenderVersions.TryGetValue(slot, out long activeVersion) && activeVersion == expectedVersion;
+        }
+
+        private void CancelPendingSampleLoad()
+        {
+            if (_sampleLoadPreviewCts == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _sampleLoadPreviewCts.Cancel();
+            }
+            catch
+            {
+                // Ignore cancellation failure during disposal.
+            }
         }
 
         private void CancelSlotPreviewRender(LabelTemplateType slot)
@@ -876,36 +916,44 @@ namespace OpenBISLabelStudio
         {
             foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
             {
-                long nextVersion = (_slotRenderVersions.TryGetValue(slot, out long current) ? current : 0) + 1;
-                _slotRenderVersions[slot] = nextVersion;
+                NextSlotRenderVersion(slot);
                 CancelSlotPreviewRender(slot);
             }
         }
 
         private static void SetPictureBoxImage(PictureBox? picBox, Image? newImage)
         {
-            if (picBox == null)
+            if (picBox == null || picBox.IsDisposed)
             {
                 newImage?.Dispose();
                 return;
             }
 
             Image? previous = picBox.Image;
-            picBox.Image = newImage;
-            if (previous != null && !ReferenceEquals(previous, newImage))
+            if (ReferenceEquals(previous, newImage))
             {
-                previous.Dispose();
+                return;
             }
+
+            picBox.Image = newImage;
+            previous?.Dispose();
+        }
+
+        private void ClearSlotPreviewImages()
+        {
+            CancelAllSlotPreviewRenders();
+            SetPictureBoxImage(smallBoxLabelPreview, null);
+            SetPictureBoxImage(magnetLabelPreview, null);
+            SetPictureBoxImage(flaskLabelPreview, null);
         }
 
         private void ClearAllPreviews()
         {
-            CancelAllSlotPreviewRenders();
-            _currentSampleDetails = null;
-
-            SetPictureBoxImage(smallBoxLabelPreview, null);
-            SetPictureBoxImage(magnetLabelPreview, null);
-            SetPictureBoxImage(flaskLabelPreview, null);
+            ClearSlotPreviewImages();
+            _hasLoadedSample = false;
+            _loadedSampleName = "";
+            _loadedSamplePermId = "";
+            _loadedSampleLabel = "";
 
             magnetFreeTextBox.Text = "";
             flaskFreeTextBox.Text = "";
@@ -920,13 +968,6 @@ namespace OpenBISLabelStudio
             openbisObjectsComboBox.Enabled = enabled;
             loadPrintTemplates.Enabled = enabled;
             btnPrintLabel.Enabled = enabled;
-        }
-
-        private void SetControlsEnabled(bool enabled)
-        {
-            openbisTypeComboBox.Enabled = enabled;
-            SetSampleQueryControlsEnabled(enabled);
-            btnSettings.Enabled = enabled;
         }
 
         private void SetLoadingFeedback(string message)
@@ -977,74 +1018,66 @@ namespace OpenBISLabelStudio
                 !hasNotice ? null : (string.IsNullOrWhiteSpace(_persistentNoticeTooltip) ? _persistentNoticeMessage : _persistentNoticeTooltip));
         }
 
-        private static string FormatOpenBisError(string? error, string fallback)
-        {
-            return string.IsNullOrWhiteSpace(error) ? fallback : error;
-        }
-
         // =========================================================================
         // PRINT LABELS BUTTON CLICK (SEND SELECTED LABELS VIA b-PAC)
         // =========================================================================
         private async void btnPrintLabel_Click_1(object sender, EventArgs e)
         {
-            if (_currentSampleDetails == null)
+            if (!_hasLoadedSample)
             {
                 MessageBox.Show("Please click 'Load Templates' first to load an openBIS object.", "Print Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            LabelTemplateProfile activeProfile = GetActiveTemplateProfile();
-            var printJobs = new List<LabelPrintJobRequest>();
+            var selections = new List<PrintSlotSelection>();
 
             if (smallBoxLabelCheckBox.Checked)
             {
-                string printer = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.SmallBoxPrinter;
-                printJobs.Add(new LabelPrintJobRequest
+                selections.Add(new PrintSlotSelection
                 {
                     Slot = LabelTemplateType.SmallBox12mm,
-                    LabelName = "Small Box 12mm Label",
-                    PrinterName = printer,
+                    PrinterName = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _fallbackSmallBoxPrinter,
                     FreeText = ""
                 });
             }
 
             if (magnetLabelCheckBox.Checked)
             {
-                string printer = magnetPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.MagnetPrinter;
-                printJobs.Add(new LabelPrintJobRequest
+                selections.Add(new PrintSlotSelection
                 {
                     Slot = LabelTemplateType.Magnet12mm,
-                    LabelName = "Magnet 12mm Label",
-                    PrinterName = printer,
-                    FreeText = activeProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : ""
+                    PrinterName = magnetPrinterComboBox.SelectedItem?.ToString() ?? _fallbackMagnetPrinter,
+                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : ""
                 });
             }
 
             if (flaskLabelCheckBox.Checked)
             {
-                string printer = flaskPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.FlaskPrinter;
-                printJobs.Add(new LabelPrintJobRequest
+                selections.Add(new PrintSlotSelection
                 {
                     Slot = LabelTemplateType.Flask24mm,
-                    LabelName = "Flask 24mm Label",
-                    PrinterName = printer,
-                    FreeText = activeProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : ""
+                    PrinterName = flaskPrinterComboBox.SelectedItem?.ToString() ?? _fallbackFlaskPrinter,
+                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : ""
                 });
             }
 
-            if (printJobs.Count == 0)
+            if (selections.Count == 0)
             {
                 MessageBox.Show("Please select at least one label template to print (check the box at the top-right of the label).", "No Label Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            SampleDetailsDto sampleSnapshot = _currentSampleDetails;
+            string sampleSummary = string.IsNullOrWhiteSpace(_loadedSampleLabel)
+                ? (openbisObjectsComboBox.SelectedItem?.ToString() ?? "")
+                : _loadedSampleLabel;
+            LabelTemplateProfile profileSnapshot = _activeProfile;
+
             SetSampleQueryControlsEnabled(false);
-            SetLoadingFeedback($"Printing {printJobs.Count} label(s)...");
+            SetLoadingFeedback($"Printing {selections.Count} label(s)...");
 
             try
             {
-                LabelPrintBatchResult batchResult = await _previewRenderer.PrintLabelsAsync(activeProfile, sampleSnapshot, printJobs);
+                LabelPrintBatchResult batchResult = await _backend.PrintSelectedLabelsAsync(selections);
                 if (IsDisposed || Disposing)
                 {
                     return;
@@ -1053,8 +1086,11 @@ namespace OpenBISLabelStudio
                 ClearLoadingFeedback();
 
                 var sb = new StringBuilder();
-                sb.AppendLine($"Sample: {sampleSnapshot.Name} ({sampleSnapshot.PermId})");
-                sb.AppendLine($"Template Profile: {activeProfile}");
+                if (!string.IsNullOrWhiteSpace(sampleSummary))
+                {
+                    sb.AppendLine($"Sample: {sampleSummary}");
+                }
+                sb.AppendLine($"Template Profile: {profileSnapshot}");
                 sb.AppendLine();
 
                 foreach (LabelPrintJobResult job in batchResult.Jobs)
@@ -1094,23 +1130,19 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private void btnSettings_Click(object? sender, EventArgs e)
+        private async void btnSettings_Click(object? sender, EventArgs e)
         {
             // Cancel any in-flight startup type refresh so it cannot open recovery UI over Settings or apply stale data.
             ++_typeRefreshRequestVersion;
 
-            string previousUrl = _config.OpenBisUrl;
-            string previousToken = _config.Token;
+            string previousFingerprint = _credentialFingerprint;
             string previousTypeCode = _currentSelectedTypeCode;
-            LabelTemplateProfile previousProfile = GetActiveTemplateProfile();
+            LabelTemplateProfile previousProfile = _activeProfile;
 
             using var settingsForm = new SetupSettingsForm(
-                _configService,
-                _openBisClient,
-                _previewRenderer,
+                _backend,
                 SetupDialogMode.Settings,
-                SetupWizardStep.Connection,
-                installedPrintersProvider: _installedPrintersProvider);
+                SetupWizardStep.Connection);
 
             if (settingsForm.ShowDialog(this) != DialogResult.OK)
             {
@@ -1118,43 +1150,47 @@ namespace OpenBISLabelStudio
             }
 
             ++_typeRefreshRequestVersion;
-            ReloadConfiguredStateFromDisk();
-            PopulateInstalledPrinters();
+            WorkspaceStartupState startup = await _backend.InitializeWorkspaceAsync(_recoveryPrompter);
+            if (IsDisposed || Disposing)
+            {
+                return;
+            }
 
-            bool credentialsChanged = !string.Equals(previousUrl, _config.OpenBisUrl, StringComparison.Ordinal)
-                                      || !string.Equals(previousToken, _config.Token, StringComparison.Ordinal);
+            _credentialFingerprint = startup.CredentialFingerprint ?? "";
+            PopulateInstalledPrinters(startup.Printers);
 
-            bool activeTypeStillConfigured = !string.IsNullOrWhiteSpace(previousTypeCode)
-                && _configuredTypes.Any(t => string.Equals(t.Code, previousTypeCode, StringComparison.OrdinalIgnoreCase));
+            bool credentialsChanged = !string.Equals(previousFingerprint, _credentialFingerprint, StringComparison.Ordinal);
 
-            if (credentialsChanged || !activeTypeStillConfigured)
+            TypeOptionDto? matchingType = !string.IsNullOrWhiteSpace(previousTypeCode)
+                ? startup.ConfiguredTypes.FirstOrDefault(t => string.Equals(t.Code, previousTypeCode, StringComparison.OrdinalIgnoreCase))
+                : null;
+
+            if (credentialsChanged || matchingType == null)
             {
                 ++_typeSelectionRequestVersion;
                 ++_sampleDetailsRequestVersion;
-                PopulateOpenBisTypeComboBox(preferredTypeCode: null);
+                CancelPendingSampleLoad();
+                PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode: null);
                 openbisObjectsComboBox.Items.Clear();
-                _loadedSamples.Clear();
+                _backend.ClearActiveSample();
                 ClearAllPreviews();
                 UpdateFreeTextControlsState();
             }
             else
             {
-                PopulateOpenBisTypeComboBox(preferredTypeCode: previousTypeCode);
-                LabelTemplateProfile updatedProfile = GetActiveTemplateProfile();
+                PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode: previousTypeCode);
+                LabelTemplateProfile updatedProfile = _activeProfile;
                 UpdateFreeTextControlsState();
 
-                if (_currentSampleDetails != null && updatedProfile != previousProfile)
+                if (_hasLoadedSample
+                    && updatedProfile != previousProfile
+                    && !string.IsNullOrWhiteSpace(_loadedSamplePermId))
                 {
-                    RenderAllSlotPreviews(updatedProfile, _currentSampleDetails);
+                    await LoadAndStreamSamplePreviewsAsync(previousTypeCode, _loadedSamplePermId, _loadedSampleName);
                 }
             }
 
-            if (settingsForm.CachedServerTypes != null)
-            {
-                ClearStatusNotice();
-                ApplyServerTypeDescriptions(settingsForm.CachedServerTypes);
-            }
-            else if (credentialsChanged)
+            if (settingsForm.TypesSyncedFromServer || credentialsChanged)
             {
                 ClearStatusNotice();
             }

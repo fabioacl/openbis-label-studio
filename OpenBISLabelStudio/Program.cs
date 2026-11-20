@@ -1,6 +1,6 @@
 using System;
 using System.Text;
-using OpenBISLabelStudio.Services;
+using OpenBISLabelStudio.Backend.Services;
 
 namespace OpenBISLabelStudio
 {
@@ -16,7 +16,7 @@ namespace OpenBISLabelStudio
             {
                 Console.InputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
                 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-                LabelPreviewRenderer.RunPreviewWorkerLoop(Console.In, Console.Out);
+                LabelStudioBackend.RunPreviewWorkerLoop(Console.In, Console.Out);
                 return;
             }
 
@@ -25,11 +25,12 @@ namespace OpenBISLabelStudio
             ApplicationConfiguration.Initialize();
             try
             {
-                Application.Run(new Form1());
+                using var backend = new LabelStudioBackend();
+                Application.Run(new Form1(backend));
             }
             finally
             {
-                LabelPreviewRenderer.ShutdownPreviewWorker();
+                LabelStudioBackend.ShutdownPreviewWorker();
             }
         }
     }

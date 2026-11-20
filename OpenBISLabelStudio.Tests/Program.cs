@@ -54,7 +54,9 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendExpiresTokenRecoveryCoalescesAndRetriesWithoutUiForms), BackendExpiresTokenRecoveryCoalescesAndRetriesWithoutUiForms),
                 (nameof(BackendLoadSamplePreviewsAndFreeTextIsolationPreventsStaleState), BackendLoadSamplePreviewsAndFreeTextIsolationPreventsStaleState),
                 (nameof(BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory), BackendValidatesAndSavesWizardAndSettingsIsolatingBaseDirectory),
-                (nameof(BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges), BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges)
+                (nameof(BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges), BackendHelperMethodsBuildTypesResolveProfileAndDetectCredentialChanges),
+                (nameof(Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes), Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes),
+                (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
             int failures = 0;
@@ -915,7 +917,7 @@ namespace OpenBISLabelStudio.Tests
                 new OpenBisTypeInfoDto { Code = "CUSTOM_PLATE", Description = "" }
             };
 
-            List<ConfiguredOpenBisType> initialRows = SetupSettingsForm.BuildInitialTypeRows(
+            List<ConfiguredOpenBisType> initialRows = LabelStudioBackend.BuildInitialTypeRows(
                 serverTypes,
                 Array.Empty<ConfiguredOpenBisType>());
 
@@ -936,7 +938,7 @@ namespace OpenBISLabelStudio.Tests
                 }
             };
 
-            List<ConfiguredOpenBisType> mergedRows = SetupSettingsForm.BuildInitialTypeRows(serverTypes, saved);
+            List<ConfiguredOpenBisType> mergedRows = LabelStudioBackend.BuildInitialTypeRows(serverTypes, saved);
             AssertEqual(LabelTemplateProfile.Molecule, mergedRows[0].TemplateProfile, "SUBSTANCE should still default to Molecule");
             AssertEqual(LabelTemplateProfile.Molecule, mergedRows[1].TemplateProfile, "Saved CRYSTAL mapping must override Generic default");
             AssertEqual(LabelTemplateProfile.Generic, mergedRows[2].TemplateProfile, "Unconfigured CUSTOM_PLATE should default to Generic");
@@ -951,14 +953,37 @@ namespace OpenBISLabelStudio.Tests
 
                 var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
-                using var form = new SetupSettingsForm(
+                using var backend = new LabelStudioBackend(
                     configService,
                     client,
                     renderer,
-                    SetupDialogMode.Settings,
                     installedPrintersProvider: () => new[] { "Brother PT-P700" });
+                using var form = new SetupSettingsForm(backend, SetupDialogMode.Settings);
 
-                form.ApplyServerTypes(serverTypes);
+                form.ApplyTypeRows(new[]
+                {
+                    new ObjectTypeRowDto
+                    {
+                        IsSelected = false,
+                        Code = mergedRows[0].Code,
+                        DisplayName = mergedRows[0].DisplayName,
+                        TemplateProfile = mergedRows[0].TemplateProfile
+                    },
+                    new ObjectTypeRowDto
+                    {
+                        IsSelected = true,
+                        Code = mergedRows[1].Code,
+                        DisplayName = mergedRows[1].DisplayName,
+                        TemplateProfile = mergedRows[1].TemplateProfile
+                    },
+                    new ObjectTypeRowDto
+                    {
+                        IsSelected = false,
+                        Code = mergedRows[2].Code,
+                        DisplayName = mergedRows[2].DisplayName,
+                        TemplateProfile = mergedRows[2].TemplateProfile
+                    }
+                });
                 var grid = FindControl<DataGridView>(form, "dgvObjectTypes");
                 var txtFilter = FindControl<TextBox>(form, "txtTypeFilter");
                 AssertEqual(3, grid.Rows.Count, "Grid should display all 3 server types");
@@ -989,13 +1014,15 @@ namespace OpenBISLabelStudio.Tests
                 var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
 
-                using (var wizardForm = new SetupSettingsForm(
+                using (var wizardBackend = new LabelStudioBackend(
                     configService,
                     client,
                     renderer,
-                    SetupDialogMode.Wizard,
-                    SetupWizardStep.Printers,
                     installedPrintersProvider: () => Array.Empty<string>()))
+                using (var wizardForm = new SetupSettingsForm(
+                    wizardBackend,
+                    SetupDialogMode.Wizard,
+                    SetupWizardStep.Printers))
                 {
                     AssertEqual(SetupDialogMode.Wizard, wizardForm.Mode, "Expected Wizard mode");
                     ShowOffscreen(wizardForm);
@@ -1022,13 +1049,15 @@ namespace OpenBISLabelStudio.Tests
                     FlaskPrinter = "Brother PT-P700 (Custom Flask)"
                 });
 
-                using (var settingsForm = new SetupSettingsForm(
+                using (var settingsBackend = new LabelStudioBackend(
                     configService,
                     client,
                     renderer,
-                    SetupDialogMode.Settings,
-                    SetupWizardStep.Printers,
                     installedPrintersProvider: () => new[] { "OneNote (Desktop)", "Microsoft Print to PDF" }))
+                using (var settingsForm = new SetupSettingsForm(
+                    settingsBackend,
+                    SetupDialogMode.Settings,
+                    SetupWizardStep.Printers))
                 {
                     AssertEqual(SetupDialogMode.Settings, settingsForm.Mode, "Expected Settings mode");
                     var tabObjectTypes = FindControl<Button>(settingsForm, "btnTabObjectTypes");
@@ -1067,15 +1096,17 @@ namespace OpenBISLabelStudio.Tests
 
                 var client = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
-
-                using var form = new SetupSettingsForm(
+                using var backend = new LabelStudioBackend(
                     configService,
                     client,
                     renderer,
+                    installedPrintersProvider: () => Array.Empty<string>());
+
+                using var form = new SetupSettingsForm(
+                    backend,
                     SetupDialogMode.ExpiredTokenRecovery,
                     SetupWizardStep.Connection,
-                    initialWarning: "Token expired",
-                    installedPrintersProvider: () => Array.Empty<string>());
+                    initialWarning: "Token expired");
 
                 AssertEqual(SetupDialogMode.ExpiredTokenRecovery, form.Mode, "Expected ExpiredTokenRecovery mode");
                 var txtUrl = FindControl<TextBox>(form, "txtInstanceUrl");
@@ -1124,14 +1155,14 @@ namespace OpenBISLabelStudio.Tests
                 var offlineClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
                 string[] printers = { "Brother PT-P700 (A)", "Brother PT-P700 (B)", "Brother PT-P700 (C)", "Brother PT-P700 (X)", "Brother PT-P700 (Y)", "Brother PT-P700 (Z)" };
-
-                // 1. Modify state and Cancel -> disk files must remain untouched.
-                using (var cancelForm = new SetupSettingsForm(
+                using var backend = new LabelStudioBackend(
                     configService,
                     offlineClient,
                     renderer,
-                    SetupDialogMode.Settings,
-                    installedPrintersProvider: () => printers))
+                    installedPrintersProvider: () => printers);
+
+                // 1. Modify state and Cancel -> disk files must remain untouched.
+                using (var cancelForm = new SetupSettingsForm(backend, SetupDialogMode.Settings))
                 {
                     FindControl<TextBox>(cancelForm, "txtInstanceUrl").Text = "https://changed.example.org";
                     FindControl<TextBox>(cancelForm, "txtToken").Text = "changed-token";
@@ -1148,18 +1179,15 @@ namespace OpenBISLabelStudio.Tests
 
                 // 2. Verify live example preview rendering on Page 2 + invalid save guard + valid TrySaveSettingsOffline.
                 using (var saveForm = new SetupSettingsForm(
-                    configService,
-                    offlineClient,
-                    renderer,
+                    backend,
                     SetupDialogMode.Settings,
-                    SetupWizardStep.ObjectTypes,
-                    installedPrintersProvider: () => printers))
+                    SetupWizardStep.ObjectTypes))
                 {
-                    // Pre-seed CachedServerTypes so OnShown does not spawn offlineClient during UI preview verification.
-                    saveForm.ApplyServerTypes(new[]
+                    // Pre-seed TypesSyncedFromServer so OnShown does not spawn offlineClient during UI preview verification.
+                    saveForm.ApplyTypeRows(new[]
                     {
-                        new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
-                        new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" }
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic }
                     });
                     ShowOffscreen(saveForm);
 
@@ -1171,18 +1199,18 @@ namespace OpenBISLabelStudio.Tests
                     AssertNotNull(FindControl<PictureBox>(saveForm, "picPreviewMagnet").Image, "Generic Magnet preview image should be populated");
                     AssertTrue(saveForm.Visible, "ObjectTypes page should remain responsive while async previews render");
 
-                    // Verify ApplyServerTypes preserves current row selection instead of jumping back to row 0.
+                    // Verify ApplyTypeRows preserves current row selection instead of jumping back to row 0.
                     var typesGrid = FindControl<DataGridView>(saveForm, "dgvObjectTypes");
                     typesGrid.CurrentCell = typesGrid.Rows[1].Cells[1];
-                    saveForm.ApplyServerTypes(new[]
+                    saveForm.ApplyTypeRows(new[]
                     {
-                        new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" },
-                        new OpenBisTypeInfoDto { Code = "CRYSTAL", Description = "Crystal" },
-                        new OpenBisTypeInfoDto { Code = "SAMPLE", Description = "Sample" }
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "CRYSTAL", DisplayName = "Crystal", TemplateProfile = LabelTemplateProfile.Generic },
+                        new ObjectTypeRowDto { IsSelected = false, Code = "SAMPLE", DisplayName = "Sample", TemplateProfile = LabelTemplateProfile.Generic }
                     });
                     string? activeText = typesGrid.CurrentRow?.Cells[1].Value?.ToString();
                     AssertTrue(activeText != null && activeText.Contains("CRYSTAL", StringComparison.OrdinalIgnoreCase),
-                        $"ApplyServerTypes must preserve selected row across background sync, actual: {activeText}");
+                        $"ApplyTypeRows must preserve selected row across background sync, actual: {activeText}");
 
                     FindControl<TextBox>(saveForm, "txtInstanceUrl").Text = "https://updated.example.org";
                     FindControl<TextBox>(saveForm, "txtToken").Text = "";
@@ -1237,13 +1265,13 @@ namespace OpenBISLabelStudio.Tests
                 var configService = new AppConfigService(tempFile);
                 var offlineClient = new OpenBisClient(Path.GetTempPath(), "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
-
-                using var form = new SetupSettingsForm(
+                using var backend = new LabelStudioBackend(
                     configService,
                     offlineClient,
                     renderer,
-                    SetupDialogMode.Settings,
                     installedPrintersProvider: () => new[] { "Printer A" });
+
+                using var form = new SetupSettingsForm(backend, SetupDialogMode.Settings);
 
                 var txtUrl = FindControl<TextBox>(form, "txtInstanceUrl");
                 var txtToken = FindControl<TextBox>(form, "txtToken");
@@ -1252,9 +1280,15 @@ namespace OpenBISLabelStudio.Tests
 
                 txtUrl.Text = "https://openbis.example.org";
                 txtToken.Text = "tok-123";
-                form.ApplyServerTypes(new[]
+                form.ApplyTypeRows(new[]
                 {
-                    new OpenBisTypeInfoDto { Code = "SUBSTANCE", Description = "Substance" }
+                    new ObjectTypeRowDto
+                    {
+                        IsSelected = true,
+                        Code = "SUBSTANCE",
+                        DisplayName = "Substance",
+                        TemplateProfile = LabelTemplateProfile.Molecule
+                    }
                 });
                 var grid = FindControl<DataGridView>(form, "dgvObjectTypes");
                 grid.Rows[0].Cells[0].Value = true;
@@ -1285,46 +1319,46 @@ namespace OpenBISLabelStudio.Tests
         private static void Form1CredentialsChangedSinceRequestDetectsUrlAndTokenChanges()
         {
             AssertFalse(
-                Form1.CredentialsChangedSinceRequest("https://openbis.example.org", "tok-1", null),
+                LabelStudioBackend.CredentialsChangedSinceRequest("https://openbis.example.org", "tok-1", null),
                 "Null currentConfig must return false");
 
             AssertFalse(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://other.example.org", Token = "" }),
                 "Empty token in currentConfig must return false");
 
             AssertFalse(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://other.example.org", Token = "   " }),
                 "Whitespace token in currentConfig must return false");
 
             AssertFalse(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok-1" }),
                 "Matching URL and token must return false");
 
             AssertTrue(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://openbis.example.org", Token = "tok-2" }),
                 "Updated token must return true");
 
             AssertTrue(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://updated.example.org", Token = "tok-1" }),
                 "Updated URL with non-empty token must return true");
 
             AssertTrue(
-                Form1.CredentialsChangedSinceRequest(
+                LabelStudioBackend.CredentialsChangedSinceRequest(
                     "https://openbis.example.org",
                     "tok-1",
                     new AppConfig { OpenBisUrl = "https://updated.example.org", Token = "tok-2" }),
@@ -1363,51 +1397,51 @@ namespace OpenBISLabelStudio.Tests
                 // Mapped non-SUBSTANCE type must resolve to Molecule.
                 AssertEqual(
                     LabelTemplateProfile.Molecule,
-                    Form1.ResolveTemplateProfile("CRYSTAL", configuredTypes, null),
+                    LabelStudioBackend.ResolveTemplateProfile("CRYSTAL", configuredTypes, null),
                     "Mapped non-SUBSTANCE type should resolve to Molecule");
 
                 // Lookup must be case-insensitive and trim whitespace.
                 AssertEqual(
                     LabelTemplateProfile.Molecule,
-                    Form1.ResolveTemplateProfile("  crystal  ", configuredTypes, null),
+                    LabelStudioBackend.ResolveTemplateProfile("  crystal  ", configuredTypes, null),
                     "ResolveTemplateProfile should be case-insensitive and trim whitespace");
 
                 // Explicit configured mapping overrides legacy SUBSTANCE assumption.
                 AssertEqual(
                     LabelTemplateProfile.Generic,
-                    Form1.ResolveTemplateProfile("SUBSTANCE", configuredTypes, null),
+                    LabelStudioBackend.ResolveTemplateProfile("SUBSTANCE", configuredTypes, null),
                     "Configured Generic profile for SUBSTANCE must override legacy hardcoded assumption");
 
                 // Fallback via sampleDetailsType when selectedTypeCode is empty, null, or unconfigured.
                 AssertEqual(
                     LabelTemplateProfile.Molecule,
-                    Form1.ResolveTemplateProfile("", configuredTypes, "CUSTOM_2D"),
+                    LabelStudioBackend.ResolveTemplateProfile("", configuredTypes, "CUSTOM_2D"),
                     "Empty selectedTypeCode should fall back to sampleDetailsType");
                 AssertEqual(
                     LabelTemplateProfile.Molecule,
-                    Form1.ResolveTemplateProfile(null, configuredTypes, "custom_2d"),
+                    LabelStudioBackend.ResolveTemplateProfile(null, configuredTypes, "custom_2d"),
                     "Null selectedTypeCode should fall back to case-insensitive sampleDetailsType");
                 AssertEqual(
                     LabelTemplateProfile.Molecule,
-                    Form1.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "CRYSTAL"),
+                    LabelStudioBackend.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "CRYSTAL"),
                     "Unconfigured selectedTypeCode should fall back to sampleDetailsType");
 
                 // Unmapped types default to Generic regardless of hardcoded SUBSTANCE name.
                 AssertEqual(
                     LabelTemplateProfile.Generic,
-                    Form1.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "ALSO_UNCONFIGURED"),
+                    LabelStudioBackend.ResolveTemplateProfile("UNCONFIGURED", configuredTypes, "ALSO_UNCONFIGURED"),
                     "Unmapped type should resolve to Generic");
                 AssertEqual(
                     LabelTemplateProfile.Generic,
-                    Form1.ResolveTemplateProfile(null, configuredTypes, null),
+                    LabelStudioBackend.ResolveTemplateProfile(null, configuredTypes, null),
                     "Null inputs should resolve to Generic");
                 AssertEqual(
                     LabelTemplateProfile.Generic,
-                    Form1.ResolveTemplateProfile("SUBSTANCE", Array.Empty<ConfiguredOpenBisType>(), "SUBSTANCE"),
+                    LabelStudioBackend.ResolveTemplateProfile("SUBSTANCE", Array.Empty<ConfiguredOpenBisType>(), "SUBSTANCE"),
                     "Empty configured types should default to Generic");
                 AssertEqual(
                     LabelTemplateProfile.Generic,
-                    Form1.ResolveTemplateProfile("SUBSTANCE", null, "SUBSTANCE"),
+                    LabelStudioBackend.ResolveTemplateProfile("SUBSTANCE", null, "SUBSTANCE"),
                     "Null configured types should default safely to Generic");
             });
         }
@@ -1489,11 +1523,12 @@ namespace OpenBISLabelStudio.Tests
                 var renderer = new LabelPreviewRenderer(configService);
 
                 // 1. Verify safe startup with zero Brother PT-P700 printers and cached types shown alongside non-fatal notice.
-                using (var zeroPrinterForm = new Form1(
+                using (var zeroPrinterBackend = new LabelStudioBackend(
                     configService,
                     offlineClient,
                     renderer,
                     installedPrintersProvider: () => new[] { "OneNote (Desktop)", "Microsoft Print to PDF" }))
+                using (var zeroPrinterForm = new Form1(zeroPrinterBackend))
                 {
                     ShowOffscreen(zeroPrinterForm);
 
@@ -1522,11 +1557,12 @@ namespace OpenBISLabelStudio.Tests
                     FlaskPrinter = "Brother PT-P700 (C)"
                 });
 
-                using (var form = new Form1(
+                using (var printerBackend = new LabelStudioBackend(
                     configService,
                     offlineClient,
                     renderer,
                     installedPrintersProvider: () => new[] { "Microsoft Print to PDF", "Brother PT-P700 (A)", "Brother PT-P700 (B)", "Brother PT-P700 (C)" }))
+                using (var form = new Form1(printerBackend))
                 {
                     ShowOffscreen(form);
 
@@ -2244,6 +2280,556 @@ namespace OpenBISLabelStudio.Tests
                 "Changed token must return true");
             AssertTrue(LabelStudioBackend.CredentialsChangedSinceRequest("https://a", "t1", new AppConfig { OpenBisUrl = "https://b", Token = "t1" }),
                 "Changed URL must return true");
+        }
+
+        private sealed class StubLabelStudioBackend : ILabelStudioBackend
+        {
+            private readonly byte[] _validPngBytes;
+            private readonly object _callsLock = new object();
+
+            public StubLabelStudioBackend(byte[] validPngBytes)
+            {
+                _validPngBytes = validPngBytes;
+            }
+
+            public int WarmUpCalls { get; private set; }
+            public int InitializeWorkspaceCalls { get; private set; }
+            public int RefreshWorkspaceTypesCalls { get; private set; }
+            public int GetSettingsSnapshotCalls { get; private set; }
+            public int ClearActiveSampleCalls { get; private set; }
+            public bool Disposed { get; private set; }
+            public List<string> LoadObjectsCalls { get; } = new List<string>();
+            public List<(string TypeCode, string PermId, string MagnetText, string FlaskText)> LoadSamplePreviewsCalls { get; }
+                = new List<(string, string, string, string)>();
+            public List<(LabelTemplateType Slot, string FreeText)> RenderSlotWithFreeTextCalls { get; }
+                = new List<(LabelTemplateType, string)>();
+            public List<LabelTemplateProfile> GetExamplePreviewsCalls { get; } = new List<LabelTemplateProfile>();
+
+            public void WarmUpInBackground()
+            {
+                WarmUpCalls++;
+            }
+
+            public Task<WorkspaceStartupState> InitializeWorkspaceAsync(
+                ITokenRecoveryPrompter? recoveryPrompter = null,
+                CancellationToken ct = default)
+            {
+                InitializeWorkspaceCalls++;
+                return Task.FromResult(new WorkspaceStartupState
+                {
+                    MissingWizardStep = SetupWizardStep.None,
+                    HasValidConnection = true,
+                    CredentialFingerprint = "stub-fp-1",
+                    ConfiguredTypes = new[]
+                    {
+                        new TypeOptionDto { Code = "SUBSTANCE", DisplayText = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new TypeOptionDto { Code = "SUBSTRATE", DisplayText = "Silicon Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                    },
+                    Printers = new PrinterDropdownState
+                    {
+                        AvailablePrinters = new[] { "Brother PT-P700", "Brother PT-P700 (Kopie 1)" },
+                        HasInstalledBrotherPrinters = true,
+                        SmallBoxPrinter = "Brother PT-P700",
+                        MagnetPrinter = "Brother PT-P700 (Kopie 1)",
+                        FlaskPrinter = "Brother PT-P700",
+                        SmallBoxSelectedIndex = 0,
+                        MagnetSelectedIndex = 1,
+                        FlaskSelectedIndex = 0
+                    }
+                });
+            }
+
+            public Task<BackgroundTypeRefreshResult> RefreshWorkspaceTypesAsync(
+                ITokenRecoveryPrompter? recoveryPrompter = null,
+                CancellationToken ct = default)
+            {
+                RefreshWorkspaceTypesCalls++;
+                return Task.FromResult(new BackgroundTypeRefreshResult
+                {
+                    Success = true,
+                    TypesUpdated = false,
+                    ConfiguredTypes = new[]
+                    {
+                        new TypeOptionDto { Code = "SUBSTANCE", DisplayText = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new TypeOptionDto { Code = "SUBSTRATE", DisplayText = "Silicon Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                    }
+                });
+            }
+
+            public Task<ConnectionCheckResult> TestConnectionAsync(
+                string url,
+                string token,
+                bool persistOnSuccess,
+                CancellationToken ct = default)
+            {
+                return Task.FromResult(new ConnectionCheckResult
+                {
+                    Success = true,
+                    Persisted = persistOnSuccess,
+                    NormalizedUrl = url,
+                    Message = "Connected"
+                });
+            }
+
+            public Task<SettingsSnapshotDto> GetSettingsSnapshotAsync(CancellationToken ct = default)
+            {
+                GetSettingsSnapshotCalls++;
+                return Task.FromResult(new SettingsSnapshotDto
+                {
+                    OpenBisUrl = "https://mock.openbis.example.org",
+                    Token = "mock-token-123",
+                    ConfiguredTypes = new[]
+                    {
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                        new ObjectTypeRowDto { IsSelected = true, Code = "SUBSTRATE", DisplayName = "Silicon Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                    },
+                    Printers = new PrinterDropdownState
+                    {
+                        AvailablePrinters = new[] { "Brother PT-P700", "Brother PT-P700 (Kopie 1)" },
+                        HasInstalledBrotherPrinters = true,
+                        SmallBoxPrinter = "Brother PT-P700",
+                        MagnetPrinter = "Brother PT-P700 (Kopie 1)",
+                        FlaskPrinter = "Brother PT-P700",
+                        SmallBoxSelectedIndex = 0,
+                        MagnetSelectedIndex = 1,
+                        FlaskSelectedIndex = 0
+                    },
+                    HasValidOpenBisConfig = true,
+                    HasValidConfiguredTypes = true,
+                    HasPrinterConfig = true,
+                    FirstMissingWizardStep = SetupWizardStep.None
+                });
+            }
+
+            public Task<ServerTypeSyncResult> FetchAndMergeServerTypesAsync(
+                string url,
+                string token,
+                IReadOnlyList<ObjectTypeRowDto> currentRows,
+                CancellationToken ct = default)
+            {
+                return Task.FromResult(new ServerTypeSyncResult
+                {
+                    Success = true,
+                    ServerTypeCount = currentRows.Count,
+                    StatusMessage = $"Loaded {currentRows.Count} object type(s) from openBIS.",
+                    MergedRows = currentRows
+                });
+            }
+
+            public async Task<Dictionary<LabelTemplateType, byte[]>> GetExamplePreviewsAsync(
+                LabelTemplateProfile profile,
+                Action<LabelTemplateType, byte[]>? onSlotReady = null,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    GetExamplePreviewsCalls.Add(profile);
+                }
+
+                var result = new Dictionary<LabelTemplateType, byte[]>
+                {
+                    [LabelTemplateType.SmallBox12mm] = _validPngBytes,
+                    [LabelTemplateType.Magnet12mm] = new byte[] { 1, 2, 3 },
+                    [LabelTemplateType.Flask24mm] = Array.Empty<byte>()
+                };
+
+                await Task.Run(() =>
+                {
+                    foreach (var kvp in result)
+                    {
+                        if (!ct.IsCancellationRequested)
+                        {
+                            onSlotReady?.Invoke(kvp.Key, kvp.Value);
+                        }
+                    }
+                }, ct).ConfigureAwait(false);
+
+                return result;
+            }
+
+            public Task<OperationResult> SaveWizardStepAsync(WizardStepSaveRequest request, CancellationToken ct = default)
+                => Task.FromResult(OperationResult.Ok());
+
+            public Task<OperationResult> SaveSettingsOfflineAsync(SettingsSaveRequest request, CancellationToken ct = default)
+                => Task.FromResult(OperationResult.Ok());
+
+            public Task<SampleListResultDto> LoadObjectsForTypeAsync(
+                string typeCode,
+                ITokenRecoveryPrompter? recoveryPrompter = null,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    LoadObjectsCalls.Add(typeCode);
+                }
+
+                return Task.FromResult(new SampleListResultDto
+                {
+                    Success = true,
+                    Samples = new[]
+                    {
+                        new SampleSummaryDto
+                        {
+                            Name = "MockSubstrate-1",
+                            PermId = "PERM-MOCK-1",
+                            ModificationDate = "2026-11-20"
+                        }
+                    }
+                });
+            }
+
+            public void ClearActiveSample()
+            {
+                ClearActiveSampleCalls++;
+            }
+
+            public async Task<SamplePreviewBundleDto> LoadSamplePreviewsAsync(
+                string typeCode,
+                string permId,
+                string magnetFreeText,
+                string flaskFreeText,
+                Action<LabelTemplateType, byte[]>? onSlotReady = null,
+                ITokenRecoveryPrompter? recoveryPrompter = null,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    LoadSamplePreviewsCalls.Add((typeCode, permId, magnetFreeText, flaskFreeText));
+                }
+
+                var slots = new Dictionary<LabelTemplateType, byte[]>
+                {
+                    [LabelTemplateType.SmallBox12mm] = _validPngBytes,
+                    [LabelTemplateType.Magnet12mm] = new byte[] { 1, 2, 3 },
+                    [LabelTemplateType.Flask24mm] = Array.Empty<byte>()
+                };
+
+                await Task.Run(() =>
+                {
+                    foreach (var kvp in slots)
+                    {
+                        if (!ct.IsCancellationRequested)
+                        {
+                            onSlotReady?.Invoke(kvp.Key, kvp.Value);
+                        }
+                    }
+                }, ct).ConfigureAwait(false);
+
+                return new SamplePreviewBundleDto
+                {
+                    Success = true,
+                    Profile = LabelTemplateProfile.Generic,
+                    SampleName = "MockSubstrate-1",
+                    PermId = permId,
+                    SlotPreviews = slots
+                };
+            }
+
+            public Task<byte[]> RenderSlotWithFreeTextAsync(
+                LabelTemplateType slot,
+                string freeText,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    RenderSlotWithFreeTextCalls.Add((slot, freeText));
+                }
+
+                return Task.FromResult(GetSlotPayload(slot));
+            }
+
+            public Task<OperationResult> UpdatePrinterSelectionsAsync(
+                string smallBoxPrinter,
+                string magnetPrinter,
+                string flaskPrinter)
+                => Task.FromResult(OperationResult.Ok());
+
+            public Task<LabelPrintBatchResult> PrintSelectedLabelsAsync(
+                IReadOnlyList<PrintSlotSelection> selections,
+                CancellationToken ct = default)
+                => Task.FromResult(new LabelPrintBatchResult { AllSucceeded = true });
+
+            public byte[] GetLoadingPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile)
+                => _validPngBytes;
+
+            public byte[] GetFallbackPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile, string reason)
+                => slot == LabelTemplateType.SmallBox12mm ? _validPngBytes : new byte[] { 9, 8, 7 };
+
+            public void Dispose()
+            {
+                Disposed = true;
+            }
+
+            private byte[] GetSlotPayload(LabelTemplateType slot) => slot switch
+            {
+                LabelTemplateType.SmallBox12mm => _validPngBytes,
+                LabelTemplateType.Magnet12mm => new byte[] { 1, 2, 3 },
+                LabelTemplateType.Flask24mm => Array.Empty<byte>(),
+                _ => Array.Empty<byte>()
+            };
+        }
+
+        private static void PumpEventsUntil(Func<bool> predicate, string timeoutMessage, int timeoutMs = 3000)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (!predicate())
+            {
+                if (sw.ElapsedMilliseconds > timeoutMs)
+                {
+                    throw new TimeoutException(timeoutMessage);
+                }
+
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+
+            Application.DoEvents();
+        }
+
+        private static void Form1AndSetupSettingsFormRenderWithMockBackendAndSurviveCorruptPngBytes()
+        {
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            // Direct DecodePngBitmap safety verification against valid, corrupt, and empty PNG inputs.
+            using (Bitmap validDecoded = Form1.DecodePngBitmap(validPng))
+            {
+                AssertEqual(1, validDecoded.Width, "Decoded valid 1x1 PNG width mismatch");
+                AssertEqual(1, validDecoded.Height, "Decoded valid 1x1 PNG height mismatch");
+            }
+
+            using (Bitmap corruptDecoded = Form1.DecodePngBitmap(new byte[] { 1, 2, 3 }))
+            {
+                AssertTrue(corruptDecoded.Width > 0 && corruptDecoded.Height > 0, "Corrupt PNG fallback bitmap must have positive dimensions");
+            }
+
+            using (Bitmap emptyDecoded = Form1.DecodePngBitmap(Array.Empty<byte>(), () => new byte[] { 4, 5 }))
+            {
+                AssertTrue(emptyDecoded.Width > 0 && emptyDecoded.Height > 0, "Empty PNG with corrupt fallback must still yield valid blank Bitmap");
+            }
+
+            using (Bitmap nullDecoded = Form1.DecodePngBitmap(null))
+            {
+                AssertTrue(nullDecoded.Width > 0 && nullDecoded.Height > 0, "Null PNG bytes must yield valid blank Bitmap");
+            }
+
+            var stub = new StubLabelStudioBackend(validPng);
+
+            using (var unshownOwner = new Form())
+            {
+                var prompter = new FormTokenRecoveryPrompter(unshownOwner, stub);
+                AssertFalse(prompter.PromptForNewTokenAsync("https://x", "warn").GetAwaiter().GetResult(),
+                    "Prompter must return false safely when owner handle is not created");
+
+                using var preCanceled = new CancellationTokenSource();
+                preCanceled.Cancel();
+                AssertFalse(prompter.PromptForNewTokenAsync("https://x", "warn", preCanceled.Token).GetAwaiter().GetResult(),
+                    "Prompter must return false when CancellationToken is already canceled");
+            }
+
+            using (var form = new Form1(stub))
+            {
+                ShowOffscreen(form);
+                AssertTrue(stub.InitializeWorkspaceCalls >= 1, "Form1 must call InitializeWorkspaceAsync on load");
+
+                var cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
+                var cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+                var cmbBoxPrinter = FindControl<ComboBox>(form, "smallBoxPrinterComboBox");
+                var btnLoad = FindControl<Button>(form, "loadPrintTemplates");
+                var txtMagnetFreeText = FindControl<TextBox>(form, "magnetFreeTextBox");
+                var picSmallBox = FindControl<PictureBox>(form, "smallBoxLabelPreview");
+                var picMagnet = FindControl<PictureBox>(form, "magnetLabelPreview");
+                var picFlask = FindControl<PictureBox>(form, "flaskLabelPreview");
+                var chkSmallBox = FindControl<CheckBox>(form, "smallBoxLabelCheckBox");
+                var chkMagnet = FindControl<CheckBox>(form, "magnetLabelCheckBox");
+                var chkFlask = FindControl<CheckBox>(form, "flaskLabelCheckBox");
+
+                AssertEqual(3, cmbTypes.Items.Count, "Expected placeholder plus 2 stub types in openbisTypeComboBox");
+                AssertEqual("Brother PT-P700", cmbBoxPrinter.SelectedItem?.ToString(), "Printer combo must populate from stub PrinterDropdownState");
+
+                // Select Silicon Substrate (SUBSTRATE, Generic profile)
+                int substrateIdx = -1;
+                for (int i = 0; i < cmbTypes.Items.Count; i++)
+                {
+                    if (cmbTypes.Items[i] is TypeOptionDto opt && opt.Code == "SUBSTRATE")
+                    {
+                        substrateIdx = i;
+                        break;
+                    }
+                }
+                AssertTrue(substrateIdx > 0, "SUBSTRATE TypeOptionDto must be present in openbisTypeComboBox");
+                cmbTypes.SelectedIndex = substrateIdx;
+
+                PumpEventsUntil(() => cmbObjects.Items.Count == 1, "Timed out waiting for stub sample dropdown population");
+                AssertTrue(stub.LoadObjectsCalls.Contains("SUBSTRATE"), "Selecting SUBSTRATE must invoke LoadObjectsForTypeAsync");
+                AssertTrue(cmbObjects.Items[0] is SampleSummaryDto, "openbisObjectsComboBox items must be SampleSummaryDto");
+                AssertTrue(txtMagnetFreeText.Enabled, "Generic type must enable magnetFreeTextBox");
+
+                btnLoad.PerformClick();
+                PumpEventsUntil(
+                    () => chkSmallBox.Checked && chkMagnet.Checked && chkFlask.Checked
+                          && picSmallBox.Image != null && picMagnet.Image != null && picFlask.Image != null,
+                    "Timed out waiting for LoadSamplePreviewsAsync slots (including corrupt/empty payloads)");
+
+                AssertEqual(1, stub.LoadSamplePreviewsCalls.Count, "Load Templates click must invoke LoadSamplePreviewsAsync once");
+                AssertEqual("SUBSTRATE", stub.LoadSamplePreviewsCalls[0].TypeCode, "LoadSamplePreviewsAsync TypeCode mismatch");
+                AssertEqual("PERM-MOCK-1", stub.LoadSamplePreviewsCalls[0].PermId, "LoadSamplePreviewsAsync PermId mismatch");
+                AssertNotNull(picSmallBox.Image, "SmallBox preview image must be populated");
+                AssertNotNull(picMagnet.Image, "Magnet preview image must survive corrupt PNG bytes cleanly");
+                AssertNotNull(picFlask.Image, "Flask preview image must survive empty PNG bytes cleanly");
+
+                txtMagnetFreeText.Text = "Custom Magnet";
+                MethodInfo? leaveHandler = typeof(Form1).GetMethod(
+                    "magnetFreeTextBox_Leave",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                AssertNotNull(leaveHandler, "Expected magnetFreeTextBox_Leave handler on Form1");
+                leaveHandler!.Invoke(form, new object[] { txtMagnetFreeText, EventArgs.Empty });
+                PumpEventsUntil(
+                    () => stub.RenderSlotWithFreeTextCalls.Count == 1,
+                    "Timed out waiting for RenderSlotWithFreeTextAsync");
+                AssertEqual(LabelTemplateType.Magnet12mm, stub.RenderSlotWithFreeTextCalls[0].Slot, "FreeText slot mismatch");
+                AssertEqual("Custom Magnet", stub.RenderSlotWithFreeTextCalls[0].FreeText, "FreeText payload mismatch");
+                AssertNotNull(picMagnet.Image, "Magnet preview image must remain valid when FreeText render returns corrupt bytes");
+            }
+
+            AssertFalse(stub.Disposed, "Form1(ILabelStudioBackend) must not dispose caller-owned backend");
+
+            using (var settingsForm = new SetupSettingsForm(stub, SetupDialogMode.Settings))
+            {
+                ShowOffscreen(settingsForm);
+                AssertTrue(stub.GetSettingsSnapshotCalls >= 1, "SetupSettingsForm must call GetSettingsSnapshotAsync");
+
+                AssertEqual("https://mock.openbis.example.org", FindControl<TextBox>(settingsForm, "txtInstanceUrl").Text,
+                    "SetupSettingsForm URL must populate from stub snapshot");
+                AssertEqual("mock-token-123", FindControl<TextBox>(settingsForm, "txtToken").Text,
+                    "SetupSettingsForm token must populate from stub snapshot");
+                AssertEqual(2, FindControl<DataGridView>(settingsForm, "dgvObjectTypes").Rows.Count,
+                    "SetupSettingsForm object type grid must populate from stub snapshot");
+                AssertEqual("Brother PT-P700", FindControl<ComboBox>(settingsForm, "cmbSmallBoxPrinter").SelectedItem?.ToString(),
+                    "SetupSettingsForm printer dropdown must populate from stub snapshot");
+
+                FindControl<Button>(settingsForm, "btnTabObjectTypes").PerformClick();
+                var picExBox = FindControl<PictureBox>(settingsForm, "picPreviewSmallBox");
+                var picExMagnet = FindControl<PictureBox>(settingsForm, "picPreviewMagnet");
+                var picExFlask = FindControl<PictureBox>(settingsForm, "picPreviewFlask");
+                PumpEventsUntil(
+                    () => stub.GetExamplePreviewsCalls.Count >= 1
+                          && picExBox.Image != null && picExMagnet.Image != null && picExFlask.Image != null,
+                    "Timed out waiting for SetupSettingsForm example previews");
+            }
+
+            AssertFalse(stub.Disposed, "SetupSettingsForm must not dispose caller-owned backend");
+        }
+
+        private static void FrontendFormsContainNoBackendServiceOrSecretReferences()
+        {
+            Assembly frontendAssembly = typeof(Form1).Assembly;
+            foreach (AssemblyName refAsm in frontendAssembly.GetReferencedAssemblies())
+            {
+                string? asmName = refAsm.Name;
+                AssertFalse(string.Equals(asmName, "Newtonsoft.Json", StringComparison.OrdinalIgnoreCase),
+                    "Frontend assembly must not directly reference Newtonsoft.Json");
+                AssertFalse(asmName != null && asmName.Contains("bpac", StringComparison.OrdinalIgnoreCase),
+                    $"Frontend assembly must not reference bpac ({asmName})");
+            }
+
+            var forbiddenTypeFullNames = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "OpenBISLabelStudio.Services.AppConfigService",
+                "OpenBISLabelStudio.Services.OpenBisClient",
+                "OpenBISLabelStudio.Services.LabelPreviewRenderer",
+                "OpenBISLabelStudio.Services.TokenRecoveryCoordinator",
+                "OpenBISLabelStudio.Models.AppConfig",
+                "OpenBISLabelStudio.Models.ConfiguredOpenBisType",
+                "OpenBISLabelStudio.Models.PrinterConfig",
+                "OpenBISLabelStudio.Models.SampleDto",
+                "OpenBISLabelStudio.Models.SampleDetailsDto",
+                "OpenBISLabelStudio.Models.OpenBisTypeInfoDto",
+                "OpenBISLabelStudio.Models.OpenBisTypeItem",
+                "OpenBISLabelStudio.Models.LabelPrintJobRequest"
+            };
+
+            void AssertAllowedType(Type? type, string memberContext)
+            {
+                if (type == null)
+                {
+                    return;
+                }
+
+                if (type.IsArray || type.IsByRef || type.IsPointer)
+                {
+                    AssertAllowedType(type.GetElementType(), memberContext);
+                    return;
+                }
+
+                if (type.IsGenericType)
+                {
+                    foreach (Type arg in type.GetGenericArguments())
+                    {
+                        AssertAllowedType(arg, memberContext);
+                    }
+                }
+
+                string fullName = type.FullName ?? type.Name;
+                string ns = type.Namespace ?? "";
+                string asmName = type.Assembly.GetName().Name ?? "";
+
+                AssertFalse(forbiddenTypeFullNames.Contains(fullName),
+                    $"{memberContext} must not reference forbidden type '{fullName}'");
+                AssertFalse(ns.StartsWith("OpenBISLabelStudio.Services", StringComparison.Ordinal),
+                    $"{memberContext} must not reference OpenBISLabelStudio.Services type '{fullName}'");
+                AssertFalse(ns.StartsWith("Newtonsoft.Json", StringComparison.Ordinal)
+                            || string.Equals(asmName, "Newtonsoft.Json", StringComparison.OrdinalIgnoreCase),
+                    $"{memberContext} must not reference Newtonsoft.Json type '{fullName}'");
+                AssertFalse(ns.StartsWith("bpac", StringComparison.OrdinalIgnoreCase)
+                            || asmName.Contains("bpac", StringComparison.OrdinalIgnoreCase),
+                    $"{memberContext} must not reference bpac type '{fullName}'");
+            }
+
+            void InspectTypeTree(Type rootType)
+            {
+                const BindingFlags allMembers = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+                foreach (FieldInfo f in rootType.GetFields(allMembers))
+                {
+                    AssertAllowedType(f.FieldType, $"Field {rootType.Name}.{f.Name}");
+                }
+
+                foreach (PropertyInfo p in rootType.GetProperties(allMembers))
+                {
+                    AssertAllowedType(p.PropertyType, $"Property {rootType.Name}.{p.Name}");
+                }
+
+                foreach (ConstructorInfo c in rootType.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    foreach (ParameterInfo param in c.GetParameters())
+                    {
+                        AssertAllowedType(param.ParameterType, $"Constructor {rootType.Name}({param.Name})");
+                    }
+                }
+
+                foreach (MethodInfo m in rootType.GetMethods(allMembers))
+                {
+                    AssertAllowedType(m.ReturnType, $"Method {rootType.Name}.{m.Name} return");
+                    foreach (ParameterInfo param in m.GetParameters())
+                    {
+                        AssertAllowedType(param.ParameterType, $"Method {rootType.Name}.{m.Name}({param.Name})");
+                    }
+                }
+
+                foreach (Type nested in rootType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
+                {
+                    InspectTypeTree(nested);
+                }
+            }
+
+            InspectTypeTree(typeof(Form1));
+            InspectTypeTree(typeof(SetupSettingsForm));
+            InspectTypeTree(typeof(FormTokenRecoveryPrompter));
         }
 
         private static void ShowOffscreen(Form form)
