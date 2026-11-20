@@ -10,7 +10,7 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
   - Automatically runs on first launch (or whenever required configuration files under `config/` are missing/invalid):
     1. **Connection**: Enter your openBIS instance URL and Personal Access Token (`Show token` toggle + fast session check via `openbis_fetch.py --check` / `isSessionActive`).
     2. **Object Types & Template Profiles**: Filterable object type picker showing saved types immediately while syncing from openBIS asynchronously in the background with a loading bar. Each enabled type maps to **Molecule / Substance** (`Molecule`) or **Generic / Free-text** (`Generic`), while live example label previews render from `templates/*.lbx` in a pre-warmed `--preview-worker` process without blocking type selection.
-    3. **Printer Routing**: Map Windows printer queues to the **Small Box (12mm)**, **Magnet (12mm)**, and **Flask (24mm)** label slots (with graceful fallback if no printers are detected).
+    3. **Printer Routing**: Map Brother PT-P700 Windows printer queues to the **Small Box (12mm)**, **Magnet (12mm)**, and **Flask (24mm)** label slots (printer selectors filter strictly to `Brother PT-P700` queues with graceful fallback if none are attached).
   - Canceling initial setup while required configs are incomplete exits cleanly instead of opening an unconfigured main window.
 
 - **openBIS Integration via `pybis` (`openbis_fetch.py` + `OpenBisClient`)**:
@@ -21,7 +21,7 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
   - **Offline Resilience**: If openBIS is unreachable on startup (`connection_error`), cached `displayName` entries from `config/openbis_types.json` remain usable alongside a non-fatal status banner.
 
 - **Profile-Based Brother Label Templates (`OpenBISLabelStudio/templates/`)**:
-  - Previews and print jobs run in an out-of-process, pre-warmed `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes). Previews crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions and fall back to an installed fast local printer (`OneNote` before `Microsoft Print to PDF`) if no Brother PT-P700 driver is installed.
+  - Previews and print jobs run in an out-of-process, pre-warmed `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes). Previews crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions and fall back internally to `Microsoft Print to PDF` if no Brother PT-P700 driver is installed (example previews are cached in `%TEMP%` after first render).
   - **Molecule profile (`Molecule`)**:
     - `template_molecule_box_12mm.lbx` — Sample name, PermID QR code, researcher username.
     - `template_molecule_magnet_12mm.lbx` — Sample name, PermID QR code, researcher full name, evaporation temperature, and special storage hazard/condition icons.

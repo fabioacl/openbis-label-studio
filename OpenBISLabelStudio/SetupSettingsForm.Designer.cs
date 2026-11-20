@@ -731,7 +731,7 @@ namespace OpenBISLabelStudio
             lblNoPrintersWarning.Name = "lblNoPrintersWarning";
             lblNoPrintersWarning.Size = new Size(868, 28);
             lblNoPrintersWarning.TabIndex = 2;
-            lblNoPrintersWarning.Text = "No Windows printers detected — saved/default printer names will be kept.";
+            lblNoPrintersWarning.Text = "No Brother PT-P700 printers detected — saved/default Brother PT-P700 printer names will be kept.";
             lblNoPrintersWarning.Visible = false;
 
             // 

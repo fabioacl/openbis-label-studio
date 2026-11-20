@@ -284,6 +284,9 @@ namespace OpenBISLabelStudio.Services
             [JsonProperty("success")]
             public bool Success { get; set; }
 
+            [JsonProperty("isTemplateRender")]
+            public bool IsTemplateRender { get; set; }
+
             [JsonProperty("error")]
             public string Error { get; set; } = "";
 
@@ -362,15 +365,19 @@ namespace OpenBISLabelStudio.Services
                         }
 
                         sharedDoc ??= new bpac.Document();
-                        using Image rendered = renderer.RenderTemplatePreviewCore(
+                        using var renderedResult = renderer.RenderTemplatePreviewWithStatusCore(
                             req.Slot,
                             req.Profile,
                             req.Details,
                             req.FreeText ?? "",
                             sharedDoc);
-                        rendered.Save(req.OutPath, ImageFormat.Png);
+                        renderedResult.Image.Save(req.OutPath, ImageFormat.Png);
 
-                        response = new PreviewWorkerResponse { Success = true };
+                        response = new PreviewWorkerResponse
+                        {
+                            Success = true,
+                            IsTemplateRender = renderedResult.IsTemplateRender
+                        };
                     }
                 }
                 catch (Exception ex)
@@ -384,7 +391,91 @@ namespace OpenBISLabelStudio.Services
             }
         }
 
+        /// <summary>
+        /// Renders a Settings/Wizard Page 2 example preview, serving from an invalidated local PNG cache
+        /// when available so repeated visits appear instantaneously without re-invoking b-PAC.
+        /// </summary>
+        public async Task<Image> RenderExampleSlotPreviewAsync(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string templatePath = _configService.GetTemplateFilePath(slot, profile);
+            if (!File.Exists(templatePath))
+            {
+                return CreateFallbackPreviewBitmap(
+                    slot,
+                    profile,
+                    $"Template missing:\n{Path.GetFileName(templatePath)}");
+            }
+
+            string? cachePath = _installedPrintersProvider == null
+                ? TryBuildExamplePreviewCachePath(templatePath, slot, profile)
+                : null;
+
+            if (!string.IsNullOrEmpty(cachePath) && File.Exists(cachePath))
+            {
+                try
+                {
+                    using var fs = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    using Image cached = Image.FromStream(fs);
+                    if (cached.Width > 0 && cached.Height > 0)
+                    {
+                        return new Bitmap(cached);
+                    }
+                }
+                catch
+                {
+                    TryDeleteTempFile(cachePath);
+                }
+            }
+
+            SampleDetailsDto example = BuildExampleSampleDetails(profile);
+            string exampleFreeText = profile == LabelTemplateProfile.Generic ? "Batch #4 / Substrate" : "";
+
+            string? workerExe = _installedPrintersProvider == null ? ResolvePreviewWorkerExecutablePath() : null;
+            if (!string.IsNullOrEmpty(workerExe))
+            {
+                var renderedResult = await RenderViaWorkerProcessCoreAsync(
+                    workerExe,
+                    slot,
+                    profile,
+                    example,
+                    exampleFreeText,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (renderedResult.IsTemplateRender && !string.IsNullOrEmpty(cachePath))
+                {
+                    TrySaveBitmapToCache(renderedResult.Image, cachePath);
+                }
+
+                return renderedResult.Image;
+            }
+
+            return await RenderTemplatePreviewAsync(slot, profile, example, exampleFreeText, cancellationToken).ConfigureAwait(false);
+        }
+
         private async Task<Image> RenderViaWorkerProcessAsync(
+            string workerExePath,
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText,
+            CancellationToken cancellationToken)
+        {
+            var result = await RenderViaWorkerProcessCoreAsync(
+                workerExePath,
+                slot,
+                profile,
+                details,
+                freeText,
+                cancellationToken).ConfigureAwait(false);
+            return result.Image;
+        }
+
+        private async Task<(Image Image, bool IsTemplateRender)> RenderViaWorkerProcessCoreAsync(
             string workerExePath,
             LabelTemplateType slot,
             LabelTemplateProfile profile,
@@ -413,12 +504,12 @@ namespace OpenBISLabelStudio.Services
                     string reason = string.IsNullOrWhiteSpace(response.Error)
                         ? "Preview worker did not produce an image."
                         : response.Error;
-                    return CreateFallbackPreviewBitmap(slot, profile, reason);
+                    return (CreateFallbackPreviewBitmap(slot, profile, reason), false);
                 }
 
                 using var fs = new FileStream(outPath, FileMode.Open, FileAccess.Read, FileShare.Read);
                 using Image loaded = Image.FromStream(fs);
-                return new Bitmap(loaded);
+                return (new Bitmap(loaded), response.IsTemplateRender);
             }
             catch (OperationCanceledException)
             {
@@ -426,7 +517,7 @@ namespace OpenBISLabelStudio.Services
             }
             catch (Exception ex)
             {
-                return CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}");
+                return (CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}"), false);
             }
             finally
             {
@@ -892,7 +983,30 @@ namespace OpenBISLabelStudio.Services
             };
         }
 
+        private sealed class RenderedTemplateOutcome : IDisposable
+        {
+            public RenderedTemplateOutcome(Image image, bool isTemplateRender)
+            {
+                Image = image;
+                IsTemplateRender = isTemplateRender;
+            }
+
+            public Image Image { get; }
+            public bool IsTemplateRender { get; }
+            public void Dispose() => Image.Dispose();
+        }
+
         private Image RenderTemplatePreviewCore(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText,
+            bpac.Document? reusableDoc)
+        {
+            return RenderTemplatePreviewWithStatusCore(slot, profile, details, freeText, reusableDoc).Image;
+        }
+
+        private RenderedTemplateOutcome RenderTemplatePreviewWithStatusCore(
             LabelTemplateType slot,
             LabelTemplateProfile profile,
             SampleDetailsDto details,
@@ -904,10 +1018,12 @@ namespace OpenBISLabelStudio.Services
             string templatePath = _configService.GetTemplateFilePath(slot, profile);
             if (!File.Exists(templatePath))
             {
-                return CreateFallbackPreviewBitmap(
-                    slot,
-                    profile,
-                    $"Template missing:\n{Path.GetFileName(templatePath)}");
+                return new RenderedTemplateOutcome(
+                    CreateFallbackPreviewBitmap(
+                        slot,
+                        profile,
+                        $"Template missing:\n{Path.GetFileName(templatePath)}"),
+                    false);
             }
 
             string? tempPreviewFile = null;
@@ -937,10 +1053,12 @@ namespace OpenBISLabelStudio.Services
                 doc ??= new bpac.Document();
                 if (!doc.Open(effectiveTemplatePath))
                 {
-                    return CreateFallbackPreviewBitmap(
-                        slot,
-                        profile,
-                        $"Could not open template:\n{Path.GetFileName(templatePath)}");
+                    return new RenderedTemplateOutcome(
+                        CreateFallbackPreviewBitmap(
+                            slot,
+                            profile,
+                            $"Could not open template:\n{Path.GetFileName(templatePath)}"),
+                        false);
                 }
 
                 PopulateDocument(doc, slot, profile, details, freeText);
@@ -951,26 +1069,31 @@ namespace OpenBISLabelStudio.Services
 
                 if (!doc.Export((bpac.ExportType)4, tempPreviewFile, ExportResolutionDpi) || !File.Exists(tempPreviewFile))
                 {
-                    return CreateFallbackPreviewBitmap(
-                        slot,
-                        profile,
-                        $"Could not export preview:\n{Path.GetFileName(templatePath)}");
+                    return new RenderedTemplateOutcome(
+                        CreateFallbackPreviewBitmap(
+                            slot,
+                            profile,
+                            $"Could not export preview:\n{Path.GetFileName(templatePath)}"),
+                        false);
                 }
 
                 using var fs = new FileStream(tempPreviewFile, FileMode.Open, FileAccess.Read, FileShare.Read);
                 using Image original = Image.FromStream(fs);
                 using var exportedBitmap = new Bitmap(original);
 
-                return hasPaperSize
+                Bitmap resultBitmap = hasPaperSize
                     ? CropFallbackExportBitmap(exportedBitmap, expectedWidthPx, expectedHeightPx)
                     : new Bitmap(exportedBitmap);
+                return new RenderedTemplateOutcome(resultBitmap, true);
             }
             catch (Exception ex)
             {
-                return CreateFallbackPreviewBitmap(
-                    slot,
-                    profile,
-                    $"Preview unavailable: {ex.Message}");
+                return new RenderedTemplateOutcome(
+                    CreateFallbackPreviewBitmap(
+                        slot,
+                        profile,
+                        $"Preview unavailable: {ex.Message}"),
+                    false);
             }
             finally
             {
@@ -1101,18 +1224,58 @@ namespace OpenBISLabelStudio.Services
                 return brotherPrinter.Trim();
             }
 
-            // OneNote (Desktop) initializes ~15x faster than Microsoft Print to PDF in b-PAC
-            // and renders cleanly on a nul: local port without network spooler stalls.
-            string? oneNotePrinter = installedPrinters.FirstOrDefault(
-                p => !string.IsNullOrWhiteSpace(p) && p.Contains("OneNote", StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(oneNotePrinter))
-            {
-                return oneNotePrinter.Trim();
-            }
-
+            // Microsoft Print to PDF preserves zero-margin top-left label coordinates (unlike virtual
+            // document printers such as OneNote that clip content within 0.38" page margins).
             string? pdfPrinter = installedPrinters.FirstOrDefault(
                 p => string.Equals(p?.Trim(), "Microsoft Print to PDF", StringComparison.OrdinalIgnoreCase));
             return string.IsNullOrWhiteSpace(pdfPrinter) ? null : pdfPrinter.Trim();
+        }
+
+        private string? TryBuildExamplePreviewCachePath(
+            string templatePath,
+            LabelTemplateType slot,
+            LabelTemplateProfile profile)
+        {
+            try
+            {
+                var info = new FileInfo(templatePath);
+                if (!info.Exists)
+                {
+                    return null;
+                }
+
+                IReadOnlyList<string> installedPrinters = GetSystemInstalledPrinters();
+                bool hasBrother = installedPrinters.Any(p => !string.IsNullOrWhiteSpace(p) && p.Contains("Brother", StringComparison.OrdinalIgnoreCase));
+                string printerMode = hasBrother ? "brother" : "pdf";
+                string cacheDir = Path.Combine(Path.GetTempPath(), "openbis_example_preview_cache");
+                string fileName = $"{profile}_{slot}_{info.Length}_{info.LastWriteTimeUtc.Ticks}_{ExportResolutionDpi}_{printerMode}_v2.png";
+                return Path.Combine(cacheDir, fileName);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void TrySaveBitmapToCache(Image image, string cachePath)
+        {
+            string tempPath = "";
+            try
+            {
+                string? dir = Path.GetDirectoryName(cachePath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                tempPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                image.Save(tempPath, ImageFormat.Png);
+                File.Move(tempPath, cachePath, overwrite: true);
+            }
+            catch
+            {
+                TryDeleteTempFile(tempPath);
+            }
         }
 
         /// <summary>

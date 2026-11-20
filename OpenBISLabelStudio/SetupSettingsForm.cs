@@ -580,12 +580,6 @@ namespace OpenBISLabelStudio
                 ? _installedPrintersProvider()
                 : GetSystemInstalledPrinters();
 
-            var availablePrinters = (rawPrinters ?? Array.Empty<string>())
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Select(p => p.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
             Models.PrinterConfig defaults = AppConfigService.CreateDefaultPrinterConfig();
             string preferredBox = !string.IsNullOrWhiteSpace(savedPrinters?.SmallBoxPrinter)
                 ? savedPrinters!.SmallBoxPrinter.Trim()
@@ -597,27 +591,23 @@ namespace OpenBISLabelStudio
                 ? savedPrinters!.FlaskPrinter.Trim()
                 : defaults.FlaskPrinter;
 
-            if (availablePrinters.Count == 0)
+            (List<string> brotherPrinters, bool hasInstalledBrotherPrinters) = AppConfigService.ResolveBrotherPrinterDropdownItems(
+                rawPrinters,
+                savedPrinters);
+
+            if (!hasInstalledBrotherPrinters)
             {
                 lblNoPrintersWarning.Visible = true;
-                lblNoPrintersWarning.Text = "No Windows printers detected — saved/default printer names will be kept.";
-
-                var fallbackItems = new[] { preferredBox, preferredMagnet, preferredFlask }
-                    .Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                PopulateSinglePrinterCombo(cmbSmallBoxPrinter, fallbackItems, preferredBox);
-                PopulateSinglePrinterCombo(cmbMagnetPrinter, fallbackItems, preferredMagnet);
-                PopulateSinglePrinterCombo(cmbFlaskPrinter, fallbackItems, preferredFlask);
+                lblNoPrintersWarning.Text = "No Brother PT-P700 printers detected — saved/default Brother PT-P700 printer names will be kept.";
             }
             else
             {
                 lblNoPrintersWarning.Visible = false;
-                PopulateSinglePrinterCombo(cmbSmallBoxPrinter, availablePrinters, preferredBox);
-                PopulateSinglePrinterCombo(cmbMagnetPrinter, availablePrinters, preferredMagnet);
-                PopulateSinglePrinterCombo(cmbFlaskPrinter, availablePrinters, preferredFlask);
             }
+
+            PopulateSinglePrinterCombo(cmbSmallBoxPrinter, brotherPrinters, preferredBox);
+            PopulateSinglePrinterCombo(cmbMagnetPrinter, brotherPrinters, preferredMagnet);
+            PopulateSinglePrinterCombo(cmbFlaskPrinter, brotherPrinters, preferredFlask);
         }
 
         private static void PopulateSinglePrinterCombo(ComboBox comboBox, IReadOnlyList<string> items, string preferredName)
@@ -871,9 +861,6 @@ namespace OpenBISLabelStudio
             bool updateUiOnSlotReady,
             CancellationToken cancellationToken)
         {
-            Models.SampleDetailsDto example = LabelPreviewRenderer.BuildExampleSampleDetails(profile);
-            string exampleFreeText = profile == Models.LabelTemplateProfile.Generic ? "Batch #4 / Substrate" : "";
-
             foreach (Models.LabelTemplateType slot in Enum.GetValues<Models.LabelTemplateType>())
             {
                 if (cancellationToken.IsCancellationRequested
@@ -891,11 +878,9 @@ namespace OpenBISLabelStudio
                     continue;
                 }
 
-                Image rendered = await _previewRenderer.RenderTemplatePreviewAsync(
+                Image rendered = await _previewRenderer.RenderExampleSlotPreviewAsync(
                     slot,
                     profile,
-                    example,
-                    exampleFreeText,
                     cancellationToken);
 
                 if (IsDisposed || Disposing || _resourcesDisposed)

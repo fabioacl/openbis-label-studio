@@ -452,24 +452,23 @@ namespace OpenBISLabelStudio.Tests
                 "Should prefer another installed Brother printer when exact copy name is absent");
 
             AssertEqual(
-                "OneNote (Desktop)",
-                LabelPreviewRenderer.SelectPreviewPrinterOverride(
-                    "Brother PT-P700 (Kopie 2)",
-                    new[] { "OneNote (Desktop)", "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
-                "Should prefer local OneNote printer before Microsoft Print to PDF when no Brother printer is installed");
-
-            AssertEqual(
                 "Microsoft Print to PDF",
                 LabelPreviewRenderer.SelectPreviewPrinterOverride(
                     "Brother PT-P700 (Kopie 2)",
-                    new[] { "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
-                "Should fall back to Microsoft Print to PDF when neither Brother nor OneNote is installed");
+                    new[] { "OneNote (Desktop)", "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
+                "Should prefer Microsoft Print to PDF (not OneNote) when no Brother printer is installed");
 
             AssertNull(
                 LabelPreviewRenderer.SelectPreviewPrinterOverride(
                     "Brother PT-P700 (Kopie 2)",
-                    new[] { @"\\emp-ps2\FollowMe" }),
-                "Should return null when no fast local virtual printer is installed");
+                    new[] { "OneNote (Desktop)", @"\\emp-ps2\FollowMe" }),
+                "Should return null when neither Brother nor Microsoft Print to PDF is installed");
+
+            List<string> filteredBrother = AppConfigService.FilterBrotherPtP700Printers(
+                new[] { "OneNote (Desktop)", "Brother PT-P700", "Microsoft Print to PDF", "Brother PT-P700 (Kopie 1)", @"\\emp-ps2\FollowMe" });
+            AssertEqual(2, filteredBrother.Count, "Printer filter must keep only Brother PT-P700 queues");
+            AssertEqual("Brother PT-P700", filteredBrother[0], "Expected first Brother PT-P700 printer");
+            AssertEqual("Brother PT-P700 (Kopie 1)", filteredBrother[1], "Expected second Brother PT-P700 printer");
 
             // Test unit parsing (mm, portrait) and non-mutating temp .lbx rewrite.
             WithTempDir(tempRoot =>
@@ -799,9 +798,9 @@ namespace OpenBISLabelStudio.Tests
                 });
                 configService.SavePrinterConfig(new PrinterConfig
                 {
-                    SmallBoxPrinter = "Custom Box Queue",
-                    MagnetPrinter = "Custom Magnet Queue",
-                    FlaskPrinter = "Custom Flask Queue"
+                    SmallBoxPrinter = "Brother PT-P700 (Custom Box)",
+                    MagnetPrinter = "Brother PT-P700 (Custom Magnet)",
+                    FlaskPrinter = "Brother PT-P700 (Custom Flask)"
                 });
 
                 using (var settingsForm = new SetupSettingsForm(
@@ -810,7 +809,7 @@ namespace OpenBISLabelStudio.Tests
                     renderer,
                     SetupDialogMode.Settings,
                     SetupWizardStep.Printers,
-                    installedPrintersProvider: () => Array.Empty<string>()))
+                    installedPrintersProvider: () => new[] { "OneNote (Desktop)", "Microsoft Print to PDF" }))
                 {
                     AssertEqual(SetupDialogMode.Settings, settingsForm.Mode, "Expected Settings mode");
                     var tabObjectTypes = FindControl<Button>(settingsForm, "btnTabObjectTypes");
@@ -823,14 +822,15 @@ namespace OpenBISLabelStudio.Tests
                     AssertFalse(prgConn.Visible, "Connection loading bar should start hidden");
                     ShowOffscreen(settingsForm);
                     var warningLabel = FindControl<Label>(settingsForm, "lblNoPrintersWarning");
-                    AssertTrue(warningLabel.Visible, "Zero-printer warning label must be visible in Settings Printer Routing tab");
+                    AssertTrue(warningLabel.Visible, "Zero-Brother-printer warning label must be visible when only non-Brother printers exist");
 
                     var cmbBox = FindControl<ComboBox>(settingsForm, "cmbSmallBoxPrinter");
                     var cmbMagnet = FindControl<ComboBox>(settingsForm, "cmbMagnetPrinter");
                     var cmbFlask = FindControl<ComboBox>(settingsForm, "cmbFlaskPrinter");
-                    AssertEqual("Custom Box Queue", cmbBox.Text, "SmallBox printer should keep configured name");
-                    AssertEqual("Custom Magnet Queue", cmbMagnet.Text, "Magnet printer should keep configured name");
-                    AssertEqual("Custom Flask Queue", cmbFlask.Text, "Flask printer should keep configured name");
+                    AssertEqual("Brother PT-P700 (Custom Box)", cmbBox.Text, "SmallBox printer should keep configured Brother name");
+                    AssertEqual("Brother PT-P700 (Custom Magnet)", cmbMagnet.Text, "Magnet printer should keep configured Brother name");
+                    AssertEqual("Brother PT-P700 (Custom Flask)", cmbFlask.Text, "Flask printer should keep configured Brother name");
+                    AssertFalse(cmbBox.Items.Contains("Microsoft Print to PDF"), "Non-Brother printers must never appear in Printer dropdown");
                 }
             });
         }
@@ -893,9 +893,9 @@ namespace OpenBISLabelStudio.Tests
                 });
                 configService.SavePrinterConfig(new PrinterConfig
                 {
-                    SmallBoxPrinter = "Printer A",
-                    MagnetPrinter = "Printer B",
-                    FlaskPrinter = "Printer C"
+                    SmallBoxPrinter = "Brother PT-P700 (A)",
+                    MagnetPrinter = "Brother PT-P700 (B)",
+                    FlaskPrinter = "Brother PT-P700 (C)"
                 });
 
                 string origAppJson = File.ReadAllText(configService.OpenBisConfigPath);
@@ -904,7 +904,7 @@ namespace OpenBISLabelStudio.Tests
 
                 var offlineClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
-                string[] printers = { "Printer A", "Printer B", "Printer C", "Printer X", "Printer Y", "Printer Z" };
+                string[] printers = { "Brother PT-P700 (A)", "Brother PT-P700 (B)", "Brother PT-P700 (C)", "Brother PT-P700 (X)", "Brother PT-P700 (Y)", "Brother PT-P700 (Z)" };
 
                 // 1. Modify state and Cancel -> disk files must remain untouched.
                 using (var cancelForm = new SetupSettingsForm(
@@ -916,7 +916,7 @@ namespace OpenBISLabelStudio.Tests
                 {
                     FindControl<TextBox>(cancelForm, "txtInstanceUrl").Text = "https://changed.example.org";
                     FindControl<TextBox>(cancelForm, "txtToken").Text = "changed-token";
-                    FindControl<ComboBox>(cancelForm, "cmbSmallBoxPrinter").SelectedItem = "Printer X";
+                    FindControl<ComboBox>(cancelForm, "cmbSmallBoxPrinter").SelectedItem = "Brother PT-P700 (X)";
                     FindControl<DataGridView>(cancelForm, "dgvObjectTypes").Rows[1].Cells[2].Value = "Molecule / Substance";
 
                     ShowOffscreen(cancelForm);
@@ -981,9 +981,9 @@ namespace OpenBISLabelStudio.Tests
                     grid.Rows[1].Cells[0].Value = true;
                     grid.Rows[1].Cells[2].Value = "Molecule / Substance";
 
-                    FindControl<ComboBox>(saveForm, "cmbSmallBoxPrinter").SelectedItem = "Printer X";
-                    FindControl<ComboBox>(saveForm, "cmbMagnetPrinter").SelectedItem = "Printer Y";
-                    FindControl<ComboBox>(saveForm, "cmbFlaskPrinter").SelectedItem = "Printer Z";
+                    FindControl<ComboBox>(saveForm, "cmbSmallBoxPrinter").SelectedItem = "Brother PT-P700 (X)";
+                    FindControl<ComboBox>(saveForm, "cmbMagnetPrinter").SelectedItem = "Brother PT-P700 (Y)";
+                    FindControl<ComboBox>(saveForm, "cmbFlaskPrinter").SelectedItem = "Brother PT-P700 (Z)";
 
                     bool saved = saveForm.TrySaveSettingsOffline(out string validationError);
                     AssertTrue(saved, $"Expected TrySaveSettingsOffline to succeed, got error: {validationError}");
@@ -1002,9 +1002,9 @@ namespace OpenBISLabelStudio.Tests
 
                 PrinterConfig? savedPrinters = verifyService.LoadPrinterConfig();
                 AssertNotNull(savedPrinters, "Saved PrinterConfig missing");
-                AssertEqual("Printer X", savedPrinters!.SmallBoxPrinter, "Updated SmallBoxPrinter mismatch");
-                AssertEqual("Printer Y", savedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
-                AssertEqual("Printer Z", savedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
+                AssertEqual("Brother PT-P700 (X)", savedPrinters!.SmallBoxPrinter, "Updated SmallBoxPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Y)", savedPrinters.MagnetPrinter, "Updated MagnetPrinter mismatch");
+                AssertEqual("Brother PT-P700 (Z)", savedPrinters.FlaskPrinter, "Updated FlaskPrinter mismatch");
             });
         }
 
@@ -1261,20 +1261,20 @@ namespace OpenBISLabelStudio.Tests
                 });
                 configService.SavePrinterConfig(new PrinterConfig
                 {
-                    SmallBoxPrinter = "Printer A",
-                    MagnetPrinter = "Printer B",
-                    FlaskPrinter = "Printer C"
+                    SmallBoxPrinter = "Brother PT-P700 (A)",
+                    MagnetPrinter = "Brother PT-P700 (B)",
+                    FlaskPrinter = "Brother PT-P700 (C)"
                 });
 
                 var offlineClient = new OpenBisClient(tempRoot, "nonexistent-python-binary-xyz");
                 var renderer = new LabelPreviewRenderer(configService);
 
-                // 1. Verify safe startup with zero installed printers and cached types shown alongside non-fatal notice.
+                // 1. Verify safe startup with zero Brother PT-P700 printers and cached types shown alongside non-fatal notice.
                 using (var zeroPrinterForm = new Form1(
                     configService,
                     offlineClient,
                     renderer,
-                    installedPrintersProvider: () => Array.Empty<string>()))
+                    installedPrintersProvider: () => new[] { "OneNote (Desktop)", "Microsoft Print to PDF" }))
                 {
                     ShowOffscreen(zeroPrinterForm);
 
@@ -1289,24 +1289,25 @@ namespace OpenBISLabelStudio.Tests
                     AssertEqual(3, cmbTypes.Items.Count, "Expected placeholder plus 2 cached types in dropdown");
                     AssertTrue(lblNotice.Visible && !string.IsNullOrWhiteSpace(lblNotice.Text),
                         "Expected non-fatal notice banner when startup type refresh fails");
-                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Zero-printer fallback should preserve SmallBoxPrinter");
-                    AssertEqual("Printer B", cmbMagnet.SelectedItem?.ToString(), "Zero-printer fallback should preserve MagnetPrinter");
-                    AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Zero-printer fallback should preserve FlaskPrinter");
+                    AssertEqual("Brother PT-P700 (A)", cmbBox.SelectedItem?.ToString(), "Zero-Brother-printer fallback should preserve SmallBoxPrinter");
+                    AssertEqual("Brother PT-P700 (B)", cmbMagnet.SelectedItem?.ToString(), "Zero-Brother-printer fallback should preserve MagnetPrinter");
+                    AssertEqual("Brother PT-P700 (C)", cmbFlask.SelectedItem?.ToString(), "Zero-Brother-printer fallback should preserve FlaskPrinter");
+                    AssertFalse(cmbBox.Items.Contains("Microsoft Print to PDF"), "Main form printer dropdown must exclude non-Brother printers");
                 }
 
                 // 2. Verify initial mismatch does not overwrite disk during startup population, and manual selection immediately persists.
                 configService.SavePrinterConfig(new PrinterConfig
                 {
-                    SmallBoxPrinter = "Missing Printer",
-                    MagnetPrinter = "Printer B",
-                    FlaskPrinter = "Printer C"
+                    SmallBoxPrinter = "Missing Brother PT-P700",
+                    MagnetPrinter = "Brother PT-P700 (B)",
+                    FlaskPrinter = "Brother PT-P700 (C)"
                 });
 
                 using (var form = new Form1(
                     configService,
                     offlineClient,
                     renderer,
-                    installedPrintersProvider: () => new[] { "Printer A", "Printer B", "Printer C" }))
+                    installedPrintersProvider: () => new[] { "Microsoft Print to PDF", "Brother PT-P700 (A)", "Brother PT-P700 (B)", "Brother PT-P700 (C)" }))
                 {
                     ShowOffscreen(form);
 
@@ -1314,22 +1315,23 @@ namespace OpenBISLabelStudio.Tests
                     var cmbMagnet = FindControl<ComboBox>(form, "magnetPrinterComboBox");
                     var cmbFlask = FindControl<ComboBox>(form, "flaskPrinterComboBox");
 
-                    AssertEqual("Printer A", cmbBox.SelectedItem?.ToString(), "Initial SmallBoxPrinter fallback selection mismatch");
-                    AssertEqual("Printer B", cmbMagnet.SelectedItem?.ToString(), "Initial MagnetPrinter selection mismatch");
-                    AssertEqual("Printer C", cmbFlask.SelectedItem?.ToString(), "Initial FlaskPrinter selection mismatch");
-                    AssertEqual("Missing Printer", configService.LoadPrinterConfig()!.SmallBoxPrinter,
+                    AssertEqual(3, cmbBox.Items.Count, "Dropdown should contain only the 3 Brother PT-P700 queues");
+                    AssertEqual("Brother PT-P700 (A)", cmbBox.SelectedItem?.ToString(), "Initial SmallBoxPrinter fallback selection mismatch");
+                    AssertEqual("Brother PT-P700 (B)", cmbMagnet.SelectedItem?.ToString(), "Initial MagnetPrinter selection mismatch");
+                    AssertEqual("Brother PT-P700 (C)", cmbFlask.SelectedItem?.ToString(), "Initial FlaskPrinter selection mismatch");
+                    AssertEqual("Missing Brother PT-P700", configService.LoadPrinterConfig()!.SmallBoxPrinter,
                         "Startup printer fallback must not overwrite config/printers_config.json before manual selection");
 
-                    cmbBox.SelectedIndex = 1;    // Printer B
-                    cmbMagnet.SelectedIndex = 2; // Printer C
-                    cmbFlask.SelectedIndex = 0;  // Printer A
+                    cmbBox.SelectedIndex = 1;    // Brother PT-P700 (B)
+                    cmbMagnet.SelectedIndex = 2; // Brother PT-P700 (C)
+                    cmbFlask.SelectedIndex = 0;  // Brother PT-P700 (A)
                 }
 
                 PrinterConfig? persisted = configService.LoadPrinterConfig();
                 AssertNotNull(persisted, "PrinterConfig should exist after auto-save");
-                AssertEqual("Printer B", persisted!.SmallBoxPrinter, "Auto-saved SmallBoxPrinter mismatch");
-                AssertEqual("Printer C", persisted.MagnetPrinter, "Auto-saved MagnetPrinter mismatch");
-                AssertEqual("Printer A", persisted.FlaskPrinter, "Auto-saved FlaskPrinter mismatch");
+                AssertEqual("Brother PT-P700 (B)", persisted!.SmallBoxPrinter, "Auto-saved SmallBoxPrinter mismatch");
+                AssertEqual("Brother PT-P700 (C)", persisted.MagnetPrinter, "Auto-saved MagnetPrinter mismatch");
+                AssertEqual("Brother PT-P700 (A)", persisted.FlaskPrinter, "Auto-saved FlaskPrinter mismatch");
             });
         }
 

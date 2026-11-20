@@ -255,6 +255,64 @@ namespace OpenBISLabelStudio.Services
         }
 
         /// <summary>
+        /// Filters installed or configured printer names to only Brother PT-P700 queues
+        /// (trimmed, case-insensitive distinct).
+        /// </summary>
+        public static List<string> FilterBrotherPtP700Printers(IEnumerable<string>? printers)
+        {
+            if (printers == null)
+            {
+                return new List<string>();
+            }
+
+            return printers
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => p.Trim())
+                .Where(p => p.Contains("Brother PT-P700", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Resolves the Brother PT-P700 dropdown item list and indicates whether any matching
+        /// Brother PT-P700 queue is currently installed on the system.
+        /// </summary>
+        public static (List<string> Items, bool HasInstalledBrotherPrinters) ResolveBrotherPrinterDropdownItems(
+            IEnumerable<string>? installedPrinters,
+            PrinterConfig? savedOrActiveConfig)
+        {
+            List<string> installedBrother = FilterBrotherPtP700Printers(installedPrinters);
+            if (installedBrother.Count > 0)
+            {
+                return (installedBrother, true);
+            }
+
+            List<string> savedBrother = savedOrActiveConfig == null
+                ? new List<string>()
+                : FilterBrotherPtP700Printers(new[]
+                {
+                    savedOrActiveConfig.SmallBoxPrinter,
+                    savedOrActiveConfig.MagnetPrinter,
+                    savedOrActiveConfig.FlaskPrinter
+                });
+
+            if (savedBrother.Count > 0)
+            {
+                return (savedBrother, false);
+            }
+
+            PrinterConfig defaults = CreateDefaultPrinterConfig();
+            return (
+                FilterBrotherPtP700Printers(new[]
+                {
+                    defaults.SmallBoxPrinter,
+                    defaults.MagnetPrinter,
+                    defaults.FlaskPrinter
+                }),
+                false);
+        }
+
+        /// <summary>
         /// Resolves the .lbx template file path under templates/ for a given label slot and profile.
         /// </summary>
         public string GetTemplateFilePath(LabelTemplateType slot, LabelTemplateProfile profile)

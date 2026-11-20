@@ -196,39 +196,7 @@ namespace OpenBISLabelStudio
                     ? _installedPrintersProvider()
                     : GetSystemInstalledPrinters();
 
-                List<string> printers = (rawPrinters ?? Array.Empty<string>())
-                    .Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Select(p => p.Trim())
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                if (printers.Count == 0)
-                {
-                    PrinterConfig defaults = AppConfigService.CreateDefaultPrinterConfig();
-                    printers = new[]
-                        {
-                            _printerConfig.SmallBoxPrinter,
-                            _printerConfig.MagnetPrinter,
-                            _printerConfig.FlaskPrinter
-                        }
-                        .Where(p => !string.IsNullOrWhiteSpace(p))
-                        .Select(p => p.Trim())
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-
-                    if (printers.Count == 0)
-                    {
-                        printers = new[]
-                            {
-                                defaults.SmallBoxPrinter,
-                                defaults.MagnetPrinter,
-                                defaults.FlaskPrinter
-                            }
-                            .Where(p => !string.IsNullOrWhiteSpace(p))
-                            .Distinct(StringComparer.OrdinalIgnoreCase)
-                            .ToList();
-                    }
-                }
+                (List<string> printers, _) = AppConfigService.ResolveBrotherPrinterDropdownItems(rawPrinters, _printerConfig);
 
                 PopulatePrinterCombo(smallBoxPrinterComboBox, printers, _printerConfig.SmallBoxPrinter);
                 PopulatePrinterCombo(magnetPrinterComboBox, printers, _printerConfig.MagnetPrinter);
