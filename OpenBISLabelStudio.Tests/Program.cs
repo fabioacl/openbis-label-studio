@@ -64,6 +64,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendSampleSorterOrdersByNamePermIdAndModificationDate), BackendSampleSorterOrdersByNamePermIdAndModificationDate),
                 (nameof(BackendSampleSorterHandlesEdgeCasesWithoutThrowing), BackendSampleSorterHandlesEdgeCasesWithoutThrowing),
                 (nameof(BackendSortSamplesIsolatesInputAndBreaksDuplicateTies), BackendSortSamplesIsolatesInputAndBreaksDuplicateTies),
+                (nameof(BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters), BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters),
                 (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
@@ -3908,6 +3909,77 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual("20260924152631220-8238", sortedDesc[0].PermId, "Duplicate Name Descending tie should break by PermId Descending");
                 AssertEqual("20251113162300874-4172", sortedDesc[1].PermId, "Duplicate Name Descending second item mismatch");
             });
+        }
+
+        private static void BackendSampleSorterPreservesStrictWeakOrderingAcrossPunctuationDigitsAndLetters()
+        {
+            string[] names =
+            {
+                "r1", "-z", "10", "a2", "-CH3", "0a", "\u0662a", "Sample-10",
+                "--a", "3", "z9", "(rac)-A", "-methyl", "100a", "Sample 1", "A10",
+                "2a", "Sample-2", "10a"
+            };
+
+            var items = new List<SampleSummaryDto>(names.Length);
+            for (int i = 0; i < names.Length; i++)
+            {
+                items.Add(new SampleSummaryDto
+                {
+                    Name = names[i],
+                    PermId = $"P-{i:D2}",
+                    ModificationDate = "2026-11-20T00:00:00Z"
+                });
+            }
+
+            // Pairwise strict weak ordering transitivity check via public Sort API on all triples.
+            for (int a = 0; a < items.Count; a++)
+            {
+                for (int b = 0; b < items.Count; b++)
+                {
+                    if (a == b) continue;
+                    bool abFirst = SampleSorter.Sort(new[] { items[a], items[b] }, SampleSortField.Name, SampleSortDirection.Ascending)[0].PermId == items[a].PermId;
+                    bool baFirst = SampleSorter.Sort(new[] { items[b], items[a] }, SampleSortField.Name, SampleSortDirection.Ascending)[0].PermId == items[b].PermId;
+                    AssertTrue(abFirst != baFirst, $"Antisymmetry failed for '{items[a].Name}' vs '{items[b].Name}'");
+                    if (!abFirst) continue;
+
+                    for (int c = 0; c < items.Count; c++)
+                    {
+                        if (c == a || c == b) continue;
+                        bool bcFirst = SampleSorter.Sort(new[] { items[b], items[c] }, SampleSortField.Name, SampleSortDirection.Ascending)[0].PermId == items[b].PermId;
+                        if (!bcFirst) continue;
+
+                        bool acFirst = SampleSorter.Sort(new[] { items[a], items[c] }, SampleSortField.Name, SampleSortDirection.Ascending)[0].PermId == items[a].PermId;
+                        AssertTrue(acFirst,
+                            $"Transitivity cycle detected: '{items[a].Name}' < '{items[b].Name}' < '{items[c].Name}', but '{items[a].Name}' not < '{items[c].Name}'");
+                    }
+                }
+            }
+
+            // Permutation invariance (>16 items triggers IntroSort partitioning) and Asc/Desc exact reversal.
+            var reversed = new List<SampleSummaryDto>(items);
+            reversed.Reverse();
+            var interleaved = new List<SampleSummaryDto>(items.Count);
+            for (int i = 0; i < items.Count; i++)
+            {
+                int idx = (i % 2 == 0) ? i / 2 : items.Count - 1 - (i / 2);
+                interleaved.Add(items[idx]);
+            }
+
+            IReadOnlyList<SampleSummaryDto> sorted1 = SampleSorter.Sort(items, SampleSortField.Name, SampleSortDirection.Ascending);
+            IReadOnlyList<SampleSummaryDto> sorted2 = SampleSorter.Sort(reversed, SampleSortField.Name, SampleSortDirection.Ascending);
+            IReadOnlyList<SampleSummaryDto> sorted3 = SampleSorter.Sort(interleaved, SampleSortField.Name, SampleSortDirection.Ascending);
+            IReadOnlyList<SampleSummaryDto> sortedDesc1 = SampleSorter.Sort(items, SampleSortField.Name, SampleSortDirection.Descending);
+            IReadOnlyList<SampleSummaryDto> sortedDesc2 = SampleSorter.Sort(reversed, SampleSortField.Name, SampleSortDirection.Descending);
+
+            for (int i = 0; i < sorted1.Count; i++)
+            {
+                AssertEqual(sorted1[i].PermId, sorted2[i].PermId, $"Reversed input sort order diverged at index {i}");
+                AssertEqual(sorted1[i].PermId, sorted3[i].PermId, $"Interleaved input sort order diverged at index {i}");
+                AssertEqual(sorted1[sorted1.Count - 1 - i].PermId, sortedDesc1[i].PermId,
+                    $"Descending sort did not mirror Ascending at index {i}");
+                AssertEqual(sortedDesc1[i].PermId, sortedDesc2[i].PermId,
+                    $"Reversed input Descending sort diverged at index {i}");
+            }
         }
 
         private static void Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls()

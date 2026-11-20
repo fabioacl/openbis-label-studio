@@ -50,23 +50,18 @@ namespace OpenBISLabelStudio.Backend.Services
 
             while (i < spanA.Length && j < spanB.Length)
             {
-                bool digitA = char.IsAsciiDigit(spanA[i]);
-                bool digitB = char.IsAsciiDigit(spanB[j]);
-
-                if (digitA && digitB)
+                int catA = GetNaturalTokenCategory(spanA[i]);
+                int catB = GetNaturalTokenCategory(spanB[j]);
+                if (catA != catB)
                 {
-                    int endA = i;
-                    while (endA < spanA.Length && char.IsAsciiDigit(spanA[endA]))
-                    {
-                        endA++;
-                    }
+                    return catA.CompareTo(catB);
+                }
 
-                    int endB = j;
-                    while (endB < spanB.Length && char.IsAsciiDigit(spanB[endB]))
-                    {
-                        endB++;
-                    }
+                int endA = ReadTokenEnd(spanA, i, catA);
+                int endB = ReadTokenEnd(spanB, j, catB);
 
+                if (catA == 1)
+                {
                     ReadOnlySpan<char> significantA = spanA[i..endA].TrimStart('0');
                     ReadOnlySpan<char> significantB = spanB[j..endB].TrimStart('0');
 
@@ -81,63 +76,29 @@ namespace OpenBISLabelStudio.Backend.Services
                     {
                         return valCmp;
                     }
-
-                    i = endA;
-                    j = endB;
-                    continue;
                 }
-
-                if (!digitA && !digitB)
+                else if (catA == 0)
                 {
-                    int endA = i;
-                    while (endA < spanA.Length && !char.IsAsciiDigit(spanA[endA]))
+                    int symCmp = spanA[i..endA].CompareTo(spanB[j..endB], StringComparison.Ordinal);
+                    if (symCmp != 0)
                     {
-                        endA++;
+                        return symCmp;
                     }
-
-                    int endB = j;
-                    while (endB < spanB.Length && !char.IsAsciiDigit(spanB[endB]))
-                    {
-                        endB++;
-                    }
-
+                }
+                else
+                {
                     int textCmp = CultureInfo.CurrentCulture.CompareInfo.Compare(
                         spanA[i..endA],
                         spanB[j..endB],
-                        CompareOptions.IgnoreCase);
+                        CompareOptions.IgnoreCase | CompareOptions.StringSort);
                     if (textCmp != 0)
                     {
                         return textCmp;
                     }
-
-                    int ordinalCmp = spanA[i..endA].CompareTo(spanB[j..endB], StringComparison.OrdinalIgnoreCase);
-                    if (ordinalCmp != 0)
-                    {
-                        return ordinalCmp;
-                    }
-
-                    i = endA;
-                    j = endB;
-                    continue;
                 }
 
-                int mixedCmp = CultureInfo.CurrentCulture.CompareInfo.Compare(
-                    spanA.Slice(i, 1),
-                    spanB.Slice(j, 1),
-                    CompareOptions.IgnoreCase);
-                if (mixedCmp != 0)
-                {
-                    return mixedCmp;
-                }
-
-                int mixedOrdinalCmp = spanA.Slice(i, 1).CompareTo(spanB.Slice(j, 1), StringComparison.OrdinalIgnoreCase);
-                if (mixedOrdinalCmp != 0)
-                {
-                    return mixedOrdinalCmp;
-                }
-
-                i++;
-                j++;
+                i = endA;
+                j = endB;
             }
 
             if (i < spanA.Length || j < spanB.Length)
@@ -152,6 +113,28 @@ namespace OpenBISLabelStudio.Backend.Services
             }
 
             return spanA.CompareTo(spanB, StringComparison.Ordinal);
+        }
+
+        private static int GetNaturalTokenCategory(char ch)
+        {
+            // Partition strictly (0 separators < 1 ASCII digits < 2 letters/other alnum) so collation rules cannot form cycles.
+            if (char.IsAsciiDigit(ch))
+            {
+                return 1;
+            }
+
+            return char.IsLetterOrDigit(ch) ? 2 : 0;
+        }
+
+        private static int ReadTokenEnd(ReadOnlySpan<char> span, int start, int category)
+        {
+            int end = start;
+            while (end < span.Length && GetNaturalTokenCategory(span[end]) == category)
+            {
+                end++;
+            }
+
+            return end;
         }
 
         private static int CompareSamples(
