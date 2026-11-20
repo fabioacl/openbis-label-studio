@@ -38,6 +38,9 @@ namespace OpenBISLabelStudio
             openbisTypeComboBox = new ComboBox();
             selectedOpenbisTypeLabel = new Label();
             openbisObjectsComboBox = new ComboBox();
+            sortByLabel = new Label();
+            sortByComboBox = new ComboBox();
+            btnSortDirection = new Button();
             lblStatusNotice = new Label();
             prgLoading = new ProgressBar();
             loadPrintTemplates = new Button();
@@ -104,8 +107,38 @@ namespace OpenBISLabelStudio
             openbisObjectsComboBox.FormattingEnabled = true;
             openbisObjectsComboBox.Location = new Point(165, 62);
             openbisObjectsComboBox.Name = "openbisObjectsComboBox";
-            openbisObjectsComboBox.Size = new Size(875, 28);
+            openbisObjectsComboBox.Size = new Size(605, 28);
             openbisObjectsComboBox.TabIndex = 3;
+            // 
+            // sortByLabel
+            // 
+            sortByLabel.AutoSize = true;
+            sortByLabel.Location = new Point(782, 65);
+            sortByLabel.Name = "sortByLabel";
+            sortByLabel.Size = new Size(42, 20);
+            sortByLabel.TabIndex = 4;
+            sortByLabel.Text = "Sort:";
+            // 
+            // sortByComboBox
+            // 
+            sortByComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            sortByComboBox.FormattingEnabled = true;
+            sortByComboBox.Location = new Point(828, 62);
+            sortByComboBox.Name = "sortByComboBox";
+            sortByComboBox.Size = new Size(166, 28);
+            sortByComboBox.TabIndex = 5;
+            sortByComboBox.SelectedIndexChanged += sortByComboBox_SelectedIndexChanged;
+            // 
+            // btnSortDirection
+            // 
+            btnSortDirection.AccessibleName = "Sort Direction";
+            btnSortDirection.Location = new Point(1002, 62);
+            btnSortDirection.Name = "btnSortDirection";
+            btnSortDirection.Size = new Size(38, 28);
+            btnSortDirection.TabIndex = 6;
+            btnSortDirection.Text = "\u2193";
+            btnSortDirection.UseVisualStyleBackColor = true;
+            btnSortDirection.Click += btnSortDirection_Click;
             // 
             // lblStatusNotice
             // 
@@ -133,7 +166,7 @@ namespace OpenBISLabelStudio
             loadPrintTemplates.Location = new Point(215, 460);
             loadPrintTemplates.Name = "loadPrintTemplates";
             loadPrintTemplates.Size = new Size(190, 48);
-            loadPrintTemplates.TabIndex = 4;
+            loadPrintTemplates.TabIndex = 12;
             loadPrintTemplates.Text = "Load Templates";
             loadPrintTemplates.UseVisualStyleBackColor = true;
             loadPrintTemplates.Click += loadPrintTemplates_Click;
@@ -143,7 +176,7 @@ namespace OpenBISLabelStudio
             btnPrintLabel.Location = new Point(445, 460);
             btnPrintLabel.Name = "btnPrintLabel";
             btnPrintLabel.Size = new Size(190, 48);
-            btnPrintLabel.TabIndex = 5;
+            btnPrintLabel.TabIndex = 13;
             btnPrintLabel.Text = "Print Labels";
             btnPrintLabel.UseVisualStyleBackColor = true;
             btnPrintLabel.Click += btnPrintLabel_Click_1;
@@ -153,7 +186,7 @@ namespace OpenBISLabelStudio
             btnSettings.Location = new Point(675, 460);
             btnSettings.Name = "btnSettings";
             btnSettings.Size = new Size(190, 48);
-            btnSettings.TabIndex = 6;
+            btnSettings.TabIndex = 14;
             btnSettings.Text = "Settings...";
             btnSettings.UseVisualStyleBackColor = true;
             btnSettings.Click += btnSettings_Click;
@@ -365,6 +398,9 @@ namespace OpenBISLabelStudio
             Controls.Add(loadPrintTemplates);
             Controls.Add(prgLoading);
             Controls.Add(lblStatusNotice);
+            Controls.Add(btnSortDirection);
+            Controls.Add(sortByComboBox);
+            Controls.Add(sortByLabel);
             Controls.Add(openbisObjectsComboBox);
             Controls.Add(selectedOpenbisTypeLabel);
             Controls.Add(openbisTypeComboBox);
@@ -392,6 +428,9 @@ namespace OpenBISLabelStudio
         private ComboBox openbisTypeComboBox;
         private Label selectedOpenbisTypeLabel;
         private ComboBox openbisObjectsComboBox;
+        private Label sortByLabel;
+        private ComboBox sortByComboBox;
+        private Button btnSortDirection;
         private Label lblStatusNotice;
         private ProgressBar prgLoading;
         private Button loadPrintTemplates;

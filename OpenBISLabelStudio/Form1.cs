@@ -33,6 +33,10 @@ namespace OpenBISLabelStudio
         private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
+        private bool _isUpdatingSortControls;
+        private IReadOnlyList<SampleSummaryDto> _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
+        private SampleSortField _currentSortField = SampleSortField.ModificationDate;
+        private SampleSortDirection _currentSortDirection = SampleSortDirection.Descending;
         private readonly Dictionary<LabelTemplateType, long> _slotRenderVersions = new Dictionary<LabelTemplateType, long>();
         private readonly Dictionary<LabelTemplateType, CancellationTokenSource> _slotPreviewCts = new Dictionary<LabelTemplateType, CancellationTokenSource>();
         private CancellationTokenSource? _typeRefreshCts;
@@ -62,6 +66,128 @@ namespace OpenBISLabelStudio
             _recoveryPrompter = new FormTokenRecoveryPrompter(this, _backend);
 
             InitializeComponent();
+            InitializeSortControls();
+        }
+
+        private sealed class SortFieldOption
+        {
+            public SortFieldOption(SampleSortField field, string displayText)
+            {
+                Field = field;
+                DisplayText = displayText;
+            }
+
+            public SampleSortField Field { get; }
+            public string DisplayText { get; }
+
+            public override string ToString() => DisplayText;
+        }
+
+        private void InitializeSortControls()
+        {
+            _isUpdatingSortControls = true;
+            try
+            {
+                sortByComboBox.Items.Clear();
+                sortByComboBox.Items.Add(new SortFieldOption(SampleSortField.ModificationDate, "Modification Date"));
+                sortByComboBox.Items.Add(new SortFieldOption(SampleSortField.Name, "Name"));
+                sortByComboBox.Items.Add(new SortFieldOption(SampleSortField.PermId, "PermID"));
+                sortByComboBox.SelectedIndex = 0;
+                _currentSortField = SampleSortField.ModificationDate;
+                _currentSortDirection = SampleSortDirection.Descending;
+                UpdateSortDirectionButton();
+            }
+            finally
+            {
+                _isUpdatingSortControls = false;
+            }
+        }
+
+        private void UpdateSortDirectionButton()
+        {
+            btnSortDirection.Text = _currentSortDirection == SampleSortDirection.Ascending ? "\u2191" : "\u2193";
+            string tooltip = (_currentSortField, _currentSortDirection) switch
+            {
+                (SampleSortField.Name, SampleSortDirection.Ascending) => "Name (A to Z) — click to reverse",
+                (SampleSortField.Name, SampleSortDirection.Descending) => "Name (Z to A) — click to reverse",
+                (SampleSortField.PermId, SampleSortDirection.Ascending) => "PermID (Oldest first) — click to reverse",
+                (SampleSortField.PermId, SampleSortDirection.Descending) => "PermID (Newest first) — click to reverse",
+                (_, SampleSortDirection.Ascending) => "Modification Date (Oldest first) — click to reverse",
+                _ => "Modification Date (Newest first) — click to reverse"
+            };
+            _statusToolTip.SetToolTip(btnSortDirection, tooltip);
+        }
+
+        private void ApplySortedObjects(bool preserveSelection)
+        {
+            string? selectedPermId = preserveSelection && openbisObjectsComboBox.SelectedItem is SampleSummaryDto current
+                ? current.PermId
+                : null;
+
+            IReadOnlyList<SampleSummaryDto> sorted = _backend.SortSamples(
+                _loadedTypeSamples,
+                _currentSortField,
+                _currentSortDirection);
+
+            openbisObjectsComboBox.BeginUpdate();
+            try
+            {
+                openbisObjectsComboBox.Items.Clear();
+                int restoredIndex = -1;
+                foreach (SampleSummaryDto sample in sorted)
+                {
+                    if (sample == null)
+                    {
+                        continue;
+                    }
+
+                    int index = openbisObjectsComboBox.Items.Add(sample);
+                    if (restoredIndex < 0
+                        && !string.IsNullOrEmpty(selectedPermId)
+                        && string.Equals(sample.PermId, selectedPermId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        restoredIndex = index;
+                    }
+                }
+
+                if (openbisObjectsComboBox.Items.Count > 0)
+                {
+                    openbisObjectsComboBox.SelectedIndex = restoredIndex >= 0 ? restoredIndex : 0;
+                }
+            }
+            finally
+            {
+                openbisObjectsComboBox.EndUpdate();
+            }
+        }
+
+        private void sortByComboBox_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (_isUpdatingSortControls || sortByComboBox.SelectedItem is not SortFieldOption option)
+            {
+                return;
+            }
+
+            _currentSortField = option.Field;
+            _currentSortDirection = _currentSortField == SampleSortField.Name
+                ? SampleSortDirection.Ascending
+                : SampleSortDirection.Descending;
+            UpdateSortDirectionButton();
+            ApplySortedObjects(preserveSelection: true);
+        }
+
+        private void btnSortDirection_Click(object? sender, EventArgs e)
+        {
+            if (_isUpdatingSortControls)
+            {
+                return;
+            }
+
+            _currentSortDirection = _currentSortDirection == SampleSortDirection.Ascending
+                ? SampleSortDirection.Descending
+                : SampleSortDirection.Ascending;
+            UpdateSortDirectionButton();
+            ApplySortedObjects(preserveSelection: true);
         }
 
         /// <summary>
@@ -455,6 +581,7 @@ namespace OpenBISLabelStudio
                 CancelPendingSampleLoad();
                 SetSampleQueryControlsEnabled(true);
                 selectedOpenbisTypeLabel.Text = "Type:";
+                _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
                 openbisObjectsComboBox.Items.Clear();
                 _currentSelectedTypeCode = "";
                 _activeProfile = LabelTemplateProfile.Generic;
@@ -487,6 +614,7 @@ namespace OpenBISLabelStudio
             _backend.ClearActiveSample();
 
             selectedOpenbisTypeLabel.Text = $"{selectedItem.DisplayText}:";
+            _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
             openbisObjectsComboBox.Items.Clear();
             ClearAllPreviews();
             UpdateFreeTextControlsState();
@@ -528,18 +656,8 @@ namespace OpenBISLabelStudio
                 if (result.Success)
                 {
                     ClearStatusNotice();
-                    foreach (SampleSummaryDto sample in result.Samples)
-                    {
-                        if (sample != null)
-                        {
-                            openbisObjectsComboBox.Items.Add(sample);
-                        }
-                    }
-
-                    if (openbisObjectsComboBox.Items.Count > 0)
-                    {
-                        openbisObjectsComboBox.SelectedIndex = 0;
-                    }
+                    _loadedTypeSamples = result.Samples ?? Array.Empty<SampleSummaryDto>();
+                    ApplySortedObjects(preserveSelection: false);
                 }
                 else
                 {
@@ -1017,6 +1135,8 @@ namespace OpenBISLabelStudio
         private void SetSampleQueryControlsEnabled(bool enabled)
         {
             openbisObjectsComboBox.Enabled = enabled;
+            sortByComboBox.Enabled = enabled;
+            btnSortDirection.Enabled = enabled;
             loadPrintTemplates.Enabled = enabled;
             btnPrintLabel.Enabled = enabled;
         }
@@ -1240,6 +1360,7 @@ namespace OpenBISLabelStudio
                 CancelPendingTypeSelection();
                 CancelPendingSampleLoad();
                 PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode: null);
+                _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
                 openbisObjectsComboBox.Items.Clear();
                 _backend.ClearActiveSample();
                 ClearAllPreviews();

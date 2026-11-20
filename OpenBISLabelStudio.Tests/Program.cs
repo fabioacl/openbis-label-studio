@@ -64,6 +64,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(BackendSampleSorterOrdersByNamePermIdAndModificationDate), BackendSampleSorterOrdersByNamePermIdAndModificationDate),
                 (nameof(BackendSampleSorterHandlesEdgeCasesWithoutThrowing), BackendSampleSorterHandlesEdgeCasesWithoutThrowing),
                 (nameof(BackendSortSamplesIsolatesInputAndBreaksDuplicateTies), BackendSortSamplesIsolatesInputAndBreaksDuplicateTies),
+                (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
             };
 
@@ -1462,28 +1463,53 @@ namespace OpenBISLabelStudio.Tests
             Button btnSettings = FindControl<Button>(form, "btnSettings");
             Label lblStatus = FindControl<Label>(form, "lblStatusNotice");
             ProgressBar prgLoading = FindControl<ProgressBar>(form, "prgLoading");
+            ComboBox cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
             ComboBox cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+            Label lblSortBy = FindControl<Label>(form, "sortByLabel");
+            ComboBox cmbSortBy = FindControl<ComboBox>(form, "sortByComboBox");
+            Button btnSortDir = FindControl<Button>(form, "btnSortDirection");
             GroupBox grpBox = FindControl<GroupBox>(form, "smallBoxLabelGroupBox");
             GroupBox grpMagnet = FindControl<GroupBox>(form, "magnetLabelGroupBox");
             GroupBox grpFlask = FindControl<GroupBox>(form, "flaskLabelGroupBox");
 
             AssertEqual("Settings...", btnSettings.Text, "Settings button text mismatch");
             AssertTrue(btnSettings.Enabled, "Settings button must be enabled");
+            AssertEqual("Sort:", lblSortBy.Text, "Sort label text mismatch");
+            AssertEqual(ComboBoxStyle.DropDownList, cmbSortBy.DropDownStyle, "Sort dropdown must be DropDownList");
+            AssertEqual("\u2193", btnSortDir.Text, "Sort direction button must initialize to down arrow");
+            AssertEqual(cmbTypes.Right, btnSortDir.Right, "Sort direction button must align with openbisTypeComboBox right edge");
             AssertFalse(prgLoading.Visible, "Main loading bar should start hidden");
 
             Rectangle clientBounds = new Rectangle(Point.Empty, form.ClientSize);
             AssertTrue(clientBounds.Contains(btnLoad.Bounds), $"Load button outside ClientSize: {btnLoad.Bounds}");
             AssertTrue(clientBounds.Contains(btnPrint.Bounds), $"Print button outside ClientSize: {btnPrint.Bounds}");
             AssertTrue(clientBounds.Contains(btnSettings.Bounds), $"Settings button outside ClientSize: {btnSettings.Bounds}");
+            AssertTrue(clientBounds.Contains(cmbObjects.Bounds), $"Objects dropdown outside ClientSize: {cmbObjects.Bounds}");
+            AssertTrue(clientBounds.Contains(lblSortBy.Bounds), $"Sort label outside ClientSize: {lblSortBy.Bounds}");
+            AssertTrue(clientBounds.Contains(cmbSortBy.Bounds), $"Sort dropdown outside ClientSize: {cmbSortBy.Bounds}");
+            AssertTrue(clientBounds.Contains(btnSortDir.Bounds), $"Sort direction button outside ClientSize: {btnSortDir.Bounds}");
             AssertTrue(clientBounds.Contains(lblStatus.Bounds), $"Status notice label outside ClientSize: {lblStatus.Bounds}");
             AssertTrue(clientBounds.Contains(prgLoading.Bounds), $"Loading bar outside ClientSize: {prgLoading.Bounds}");
 
             AssertFalse(btnLoad.Bounds.IntersectsWith(btnPrint.Bounds), "Load and Print buttons must not overlap");
             AssertFalse(btnLoad.Bounds.IntersectsWith(btnSettings.Bounds), "Load and Settings buttons must not overlap");
             AssertFalse(btnPrint.Bounds.IntersectsWith(btnSettings.Bounds), "Print and Settings buttons must not overlap");
+            AssertFalse(cmbObjects.Bounds.IntersectsWith(lblSortBy.Bounds), "Objects dropdown must not overlap Sort label");
+            AssertFalse(cmbObjects.Bounds.IntersectsWith(cmbSortBy.Bounds), "Objects dropdown must not overlap Sort dropdown");
+            AssertFalse(cmbObjects.Bounds.IntersectsWith(btnSortDir.Bounds), "Objects dropdown must not overlap Sort direction button");
+            AssertFalse(lblSortBy.Bounds.IntersectsWith(cmbSortBy.Bounds), "Sort label must not overlap Sort dropdown");
+            AssertFalse(cmbSortBy.Bounds.IntersectsWith(btnSortDir.Bounds), "Sort dropdown must not overlap Sort direction button");
+            AssertFalse(cmbTypes.Bounds.IntersectsWith(lblSortBy.Bounds), "Type dropdown must not overlap Sort label");
+            AssertFalse(cmbTypes.Bounds.IntersectsWith(cmbSortBy.Bounds), "Type dropdown must not overlap Sort dropdown");
+            AssertFalse(cmbTypes.Bounds.IntersectsWith(btnSortDir.Bounds), "Type dropdown must not overlap Sort direction button");
             AssertFalse(lblStatus.Bounds.IntersectsWith(cmbObjects.Bounds), "Status notice must not overlap objects dropdown");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(lblSortBy.Bounds), "Status notice must not overlap Sort label");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(cmbSortBy.Bounds), "Status notice must not overlap Sort dropdown");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(btnSortDir.Bounds), "Status notice must not overlap Sort direction button");
             AssertFalse(lblStatus.Bounds.IntersectsWith(prgLoading.Bounds), "Status notice must not overlap loading bar");
             AssertFalse(prgLoading.Bounds.IntersectsWith(cmbObjects.Bounds), "Loading bar must not overlap objects dropdown");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(cmbSortBy.Bounds), "Loading bar must not overlap Sort dropdown");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(btnSortDir.Bounds), "Loading bar must not overlap Sort direction button");
             AssertFalse(prgLoading.Bounds.IntersectsWith(grpBox.Bounds), "Loading bar must not overlap Small Box group");
             AssertFalse(prgLoading.Bounds.IntersectsWith(grpMagnet.Bounds), "Loading bar must not overlap Magnet group");
             AssertFalse(prgLoading.Bounds.IntersectsWith(grpFlask.Bounds), "Loading bar must not overlap Flask group");
@@ -3882,6 +3908,166 @@ namespace OpenBISLabelStudio.Tests
                 AssertEqual("20260924152631220-8238", sortedDesc[0].PermId, "Duplicate Name Descending tie should break by PermId Descending");
                 AssertEqual("20251113162300874-4172", sortedDesc[1].PermId, "Duplicate Name Descending second item mismatch");
             });
+        }
+
+        private static void Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls()
+        {
+            byte[] validPng = CreateValid1x1PngBytes();
+            var stub = new StubLabelStudioBackend(validPng)
+            {
+                OnLoadObjectsForTypeAsync = (typeCode, _, _) =>
+                {
+                    if (string.Equals(typeCode, "SUBSTANCE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Task.FromResult(new SampleListResultDto
+                        {
+                            Success = true,
+                            Samples = new[]
+                            {
+                                new SampleSummaryDto { Name = "0a", PermId = "20251113162300874-4172", ModificationDate = "2025-11-13T16:23:00Z" },
+                                new SampleSummaryDto { Name = "100a", PermId = "20260802101105300-7112", ModificationDate = "2026-09-30T16:20:05Z" },
+                                new SampleSummaryDto { Name = "2a", PermId = "20260301083012110-4910", ModificationDate = "2026-06-11T08:30:12Z" },
+                                new SampleSummaryDto { Name = "0a", PermId = "20260924152631220-8238", ModificationDate = "2026-10-14T11:42:10Z" },
+                                new SampleSummaryDto { Name = "10a", PermId = "20260512142010500-5820", ModificationDate = "2026-08-22T14:05:44Z" }
+                            }
+                        });
+                    }
+
+                    return Task.FromResult(new SampleListResultDto
+                    {
+                        Success = true,
+                        Samples = new[]
+                        {
+                            new SampleSummaryDto { Name = "2b", PermId = "20260101000000000-10", ModificationDate = "2026-01-02T00:00:00Z" },
+                            new SampleSummaryDto { Name = "10b", PermId = "20260101000000000-20", ModificationDate = "2026-01-01T00:00:00Z" }
+                        }
+                    });
+                }
+            };
+
+            using var form = new Form1(stub);
+            ShowOffscreen(form);
+
+            var cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
+            var cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+            var cmbSortBy = FindControl<ComboBox>(form, "sortByComboBox");
+            var btnSortDir = FindControl<Button>(form, "btnSortDirection");
+
+            PumpEventsUntil(() => cmbTypes.Items.Count == 3, "Timed out waiting for Form1 type population");
+            AssertEqual("Modification Date", cmbSortBy.SelectedItem?.ToString(), "Default sort field must be Modification Date");
+            AssertEqual("\u2193", btnSortDir.Text, "Default sort direction button text must be down arrow");
+
+            int substanceIdx = FindTypeIndex(cmbTypes, "SUBSTANCE");
+            cmbTypes.SelectedIndex = substanceIdx;
+            PumpEventsUntil(() => cmbObjects.Items.Count == 5, "Timed out waiting for SUBSTANCE sample list");
+
+            AssertTrue(stub.SortSamplesCalls >= 1, "Initial load must call SortSamples");
+            AssertEqual("20260924152631220-8238", ((SampleSummaryDto)cmbObjects.Items[0]!).PermId,
+                "Initial Modification Date Descending sort must place newest item first");
+
+            // Select 2a before re-sorting to verify PermId preservation.
+            int idx2a = -1;
+            for (int i = 0; i < cmbObjects.Items.Count; i++)
+            {
+                if (cmbObjects.Items[i] is SampleSummaryDto s && s.PermId == "20260301083012110-4910")
+                {
+                    idx2a = i;
+                    break;
+                }
+            }
+            AssertTrue(idx2a >= 0, "Expected 2a sample in dropdown");
+            cmbObjects.SelectedIndex = idx2a;
+
+            int loadCallsBeforeSort = stub.LoadObjectsCalls.Count;
+            int sortCallsBeforeSwitch = stub.SortSamplesCalls;
+
+            int nameSortIdx = FindComboTextIndex(cmbSortBy, "Name");
+            AssertTrue(nameSortIdx >= 0, "Expected 'Name' option in sortByComboBox");
+            cmbSortBy.SelectedIndex = nameSortIdx;
+
+            AssertEqual(loadCallsBeforeSort, stub.LoadObjectsCalls.Count, "Switching sort field must not re-query openBIS");
+            AssertTrue(stub.SortSamplesCalls > sortCallsBeforeSwitch, "Switching sort field must invoke backend SortSamples");
+            AssertEqual("\u2191", btnSortDir.Text, "Selecting Name must default sort direction to Ascending up arrow");
+
+            string[] expectedNameAscPermIds =
+            {
+                "20251113162300874-4172",
+                "20260924152631220-8238",
+                "20260301083012110-4910",
+                "20260512142010500-5820",
+                "20260802101105300-7112"
+            };
+            for (int i = 0; i < expectedNameAscPermIds.Length; i++)
+            {
+                AssertEqual(expectedNameAscPermIds[i], ((SampleSummaryDto)cmbObjects.Items[i]!).PermId,
+                    $"Name Ascending item order mismatch at index {i}");
+            }
+            AssertEqual("20260301083012110-4910", (cmbObjects.SelectedItem as SampleSummaryDto)?.PermId,
+                "Selected 2a PermId must stay selected after sorting by Name");
+
+            // Flip direction button -> Name Descending while preserving 2a selection.
+            btnSortDir.PerformClick();
+            AssertEqual(loadCallsBeforeSort, stub.LoadObjectsCalls.Count, "Toggling direction must not re-query openBIS");
+            AssertEqual("\u2193", btnSortDir.Text, "Toggling direction from up arrow must switch to down arrow");
+            for (int i = 0; i < expectedNameAscPermIds.Length; i++)
+            {
+                AssertEqual(expectedNameAscPermIds[expectedNameAscPermIds.Length - 1 - i],
+                    ((SampleSummaryDto)cmbObjects.Items[i]!).PermId,
+                    $"Name Descending item order mismatch at index {i}");
+            }
+            AssertEqual("20260301083012110-4910", (cmbObjects.SelectedItem as SampleSummaryDto)?.PermId,
+                "Selected 2a PermId must stay selected after direction toggle");
+
+            // Switch to PermID -> defaults to Descending (newest PermID first), preserves 2a.
+            int permSortIdx = FindComboTextIndex(cmbSortBy, "PermID");
+            AssertTrue(permSortIdx >= 0, "Expected 'PermID' option in sortByComboBox");
+            cmbSortBy.SelectedIndex = permSortIdx;
+            AssertEqual("\u2193", btnSortDir.Text, "Selecting PermID must default sort direction to Descending down arrow");
+            AssertEqual("20260924152631220-8238", ((SampleSummaryDto)cmbObjects.Items[0]!).PermId,
+                "PermID Descending must put 20260924...-8238 first");
+            AssertEqual("20260301083012110-4910", (cmbObjects.SelectedItem as SampleSummaryDto)?.PermId,
+                "Selected 2a PermId must stay selected after switching to PermID");
+
+            // Switching object type retains PermID Descending sticky preference for new type.
+            int substrateIdx = FindTypeIndex(cmbTypes, "SUBSTRATE");
+            cmbTypes.SelectedIndex = substrateIdx;
+            PumpEventsUntil(
+                () => cmbObjects.Items.Count == 2
+                      && ((SampleSummaryDto)cmbObjects.Items[0]!).PermId == "20260101000000000-20",
+                "Timed out waiting for sticky PermID Descending sort on SUBSTRATE");
+            AssertEqual("PermID", cmbSortBy.SelectedItem?.ToString(), "Sort field must remain sticky across type changes");
+            AssertEqual("\u2193", btnSortDir.Text, "Sort direction must remain sticky across type changes");
+
+            // Placeholder resets list safely and sorting an empty list does not throw.
+            cmbTypes.SelectedIndex = 0;
+            AssertEqual(0, cmbObjects.Items.Count, "Selecting placeholder type must clear objects dropdown");
+            btnSortDir.PerformClick();
+            AssertEqual("\u2191", btnSortDir.Text, "Direction toggle on empty list must still flip cleanly without error");
+            AssertEqual(0, cmbObjects.Items.Count, "Empty list must remain empty after sort toggle");
+        }
+
+        private static int FindTypeIndex(ComboBox combo, string code)
+        {
+            for (int i = 0; i < combo.Items.Count; i++)
+            {
+                if (combo.Items[i] is TypeOptionDto opt && string.Equals(opt.Code, code, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private static int FindComboTextIndex(ComboBox combo, string text)
+        {
+            for (int i = 0; i < combo.Items.Count; i++)
+            {
+                if (string.Equals(combo.Items[i]?.ToString(), text, StringComparison.Ordinal))
+                {
+                    return i;
+                }
+            }
+            return -1;
         }
 
         private static void ShowOffscreen(Form form)
