@@ -91,6 +91,24 @@ namespace OpenBISLabelStudio.Models
     }
 
     /// <summary>
+    /// Result payload returned by openbis_fetch.py --check.
+    /// </summary>
+    public class OpenBisConnectionResult
+    {
+        [JsonProperty("success")]
+        public bool Success { get; set; }
+
+        [JsonProperty("sessionActive")]
+        public bool SessionActive { get; set; }
+
+        [JsonProperty("error")]
+        public string Error { get; set; } = "";
+
+        [JsonProperty("errorType")]
+        public string ErrorType { get; set; } = "";
+    }
+
+    /// <summary>
     /// Result payload returned by openbis_fetch.py --types.
     /// </summary>
     public class OpenBisTypesResult
@@ -244,5 +262,59 @@ namespace OpenBISLabelStudio.Models
 
         [JsonProperty("tightlyClosed")]
         public bool TightlyClosed { get; set; }
+    }
+
+    /// <summary>
+    /// Represents a single label print job dispatched through the b-PAC worker.
+    /// </summary>
+    public class LabelPrintJobRequest
+    {
+        [JsonProperty("slot")]
+        public LabelTemplateType Slot { get; set; }
+
+        [JsonProperty("labelName")]
+        public string LabelName { get; set; } = "";
+
+        [JsonProperty("printerName")]
+        public string PrinterName { get; set; } = "";
+
+        [JsonProperty("freeText")]
+        public string FreeText { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Outcome for an individual label print job.
+    /// </summary>
+    public class LabelPrintJobResult
+    {
+        [JsonProperty("slot")]
+        public LabelTemplateType Slot { get; set; }
+
+        [JsonProperty("labelName")]
+        public string LabelName { get; set; } = "";
+
+        [JsonProperty("printerName")]
+        public string PrinterName { get; set; } = "";
+
+        [JsonProperty("success")]
+        public bool Success { get; set; }
+
+        [JsonProperty("error")]
+        public string Error { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Aggregate outcome for a batch of label print jobs.
+    /// </summary>
+    public class LabelPrintBatchResult
+    {
+        [JsonProperty("allSucceeded")]
+        public bool AllSucceeded { get; set; }
+
+        [JsonProperty("error")]
+        public string Error { get; set; } = "";
+
+        [JsonProperty("jobs")]
+        public List<LabelPrintJobResult> Jobs { get; set; } = new List<LabelPrintJobResult>();
     }
 }

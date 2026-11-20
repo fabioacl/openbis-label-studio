@@ -37,6 +37,22 @@ namespace OpenBISLabelStudio.Services
         public string ScriptPath => _scriptPath;
 
         /// <summary>
+        /// Verifies openBIS URL reachability and token session validity (--check) without listing object types.
+        /// </summary>
+        public Task<OpenBisConnectionResult> CheckConnectionAsync(string url, string token)
+        {
+            return RunScriptAsync(
+                new[] { url ?? "", token ?? "", "--check" },
+                (errorType, error) => new OpenBisConnectionResult
+                {
+                    Success = false,
+                    SessionActive = false,
+                    ErrorType = errorType,
+                    Error = error
+                });
+        }
+
+        /// <summary>
         /// Queries all available object/sample types from openBIS (--types).
         /// </summary>
         public Task<OpenBisTypesResult> QueryTypesAsync(string url, string token)
@@ -69,10 +85,18 @@ namespace OpenBISLabelStudio.Services
         /// <summary>
         /// Queries detailed properties, icon flags, and preview paths for a single sample (--details).
         /// </summary>
-        public Task<OpenBisDetailsResult> QuerySampleDetailsAsync(string url, string token, string permId)
+        public Task<OpenBisDetailsResult> QuerySampleDetailsAsync(
+            string url,
+            string token,
+            string permId,
+            bool skipElnPreview = false)
         {
+            var args = skipElnPreview
+                ? new[] { url ?? "", token ?? "", "--details", permId ?? "", "--skip-eln" }
+                : new[] { url ?? "", token ?? "", "--details", permId ?? "" };
+
             return RunScriptAsync(
-                new[] { url ?? "", token ?? "", "--details", permId ?? "" },
+                args,
                 (errorType, error) => new OpenBisDetailsResult
                 {
                     Success = false,

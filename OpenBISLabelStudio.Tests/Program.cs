@@ -31,6 +31,7 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(CropFallbackExportBitmapTrimsA4AndPreservesNativeSize), CropFallbackExportBitmapTrimsA4AndPreservesNativeSize),
                 (nameof(RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation), RenderTemplatePreviewAsyncCompletesOffThreadAndSupportsCancellation),
                 (nameof(PreviewWorkerLoopHandlesRequestsAndErrorsCleanly), PreviewWorkerLoopHandlesRequestsAndErrorsCleanly),
+                (nameof(PrintLabelsValidatesPrintersAndTemplatesSafely), PrintLabelsValidatesPrintersAndTemplatesSafely),
                 (nameof(BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved), BuildInitialTypeRowsDefaultsSubstanceToMoleculeAndPreservesSaved),
                 (nameof(SetupSettingsFormInitializesSafelyWithZeroPrinters), SetupSettingsFormInitializesSafelyWithZeroPrinters),
                 (nameof(SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken), SetupSettingsFormExpiredTokenModePreFillsUrlAndClearsToken),
@@ -304,10 +305,12 @@ namespace OpenBISLabelStudio.Tests
                     "    rf.write(out_path)\n" +
                     $"with open(r'''{argsFile}''', 'w', encoding='utf-8') as af:\n" +
                     "    json.dump(args, af)\n" +
-                    "if '--types' in args:\n" +
+                    "if '--check' in args:\n" +
+                    "    payload = {'success': True, 'sessionActive': True}\n" +
+                    "elif '--types' in args:\n" +
                     "    payload = {'success': False, 'errorType': 'token_expired', 'error': 'Expired'}\n" +
                     "elif '--details' in args:\n" +
-                    "    payload = {'success': True, 'details': {'permId': '2026-1', 'name': 'CuPc', 'sampleType': 'SUBSTANCE'}}\n" +
+                    "    payload = {'success': True, 'details': {'permId': '2026-1', 'name': 'CuPc', 'sampleType': 'SUBSTANCE', 'elnPreviewPath': 'skipped' if '--skip-eln' in args else 'full'}}\n" +
                     "else:\n" +
                     "    payload = {'success': True, 'data': [{'name': 'Sample-A', 'permId': '2026-9', 'modificationDate': '2026-11-13'}]}\n" +
                     "with open(out_path, 'w', encoding='utf-8') as f:\n" +
@@ -315,6 +318,12 @@ namespace OpenBISLabelStudio.Tests
 
                 var client = new OpenBisClient(tempRoot);
                 string tokenWithSpecialChars = "tok&1 \"quoted\" %TEMP%";
+                ModelTypes.OpenBisConnectionResult checkResult = client.CheckConnectionAsync("https://openbis.example.org", tokenWithSpecialChars).GetAwaiter().GetResult();
+                AssertTrue(checkResult.Success && checkResult.SessionActive, "CheckConnectionAsync (--check) must succeed");
+
+                string checkRecordedOutPath = File.ReadAllText(recordFile).Trim();
+                AssertFalse(File.Exists(checkRecordedOutPath), $"Check temp JSON output file must be deleted: {checkRecordedOutPath}");
+
                 ModelTypes.OpenBisTypesResult result = client.QueryTypesAsync("https://openbis.example.org", tokenWithSpecialChars).GetAwaiter().GetResult();
 
                 AssertFalse(result.Success, "Stub returned success=false");
@@ -338,6 +347,9 @@ namespace OpenBISLabelStudio.Tests
 
                 string secondRecordedOutPath = File.ReadAllText(recordFile).Trim();
                 AssertFalse(File.Exists(secondRecordedOutPath), $"Second temp JSON output file must be deleted: {secondRecordedOutPath}");
+
+                ModelTypes.OpenBisDetailsResult skippedDetails = client.QuerySampleDetailsAsync("https://openbis.example.org", tokenWithSpecialChars, "2026-1", skipElnPreview: true).GetAwaiter().GetResult();
+                AssertTrue(skippedDetails.Success && skippedDetails.Details?.ElnPreviewPath == "skipped", "QuerySampleDetailsAsync should pass --skip-eln when requested");
 
                 ModelTypes.OpenBisListResult listResult = client.QuerySamplesByTypeAsync("https://openbis.example.org", tokenWithSpecialChars, "SUBSTANCE").GetAwaiter().GetResult();
                 AssertTrue(listResult.Success, "Sample list stub should succeed");
@@ -440,17 +452,24 @@ namespace OpenBISLabelStudio.Tests
                 "Should prefer another installed Brother printer when exact copy name is absent");
 
             AssertEqual(
-                "Microsoft Print to PDF",
+                "OneNote (Desktop)",
                 LabelPreviewRenderer.SelectPreviewPrinterOverride(
                     "Brother PT-P700 (Kopie 2)",
                     new[] { "OneNote (Desktop)", "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
-                "Should choose local Microsoft Print to PDF when no Brother printer is installed");
+                "Should prefer local OneNote printer before Microsoft Print to PDF when no Brother printer is installed");
+
+            AssertEqual(
+                "Microsoft Print to PDF",
+                LabelPreviewRenderer.SelectPreviewPrinterOverride(
+                    "Brother PT-P700 (Kopie 2)",
+                    new[] { "Microsoft Print to PDF", @"\\emp-ps2\FollowMe" }),
+                "Should fall back to Microsoft Print to PDF when neither Brother nor OneNote is installed");
 
             AssertNull(
                 LabelPreviewRenderer.SelectPreviewPrinterOverride(
                     "Brother PT-P700 (Kopie 2)",
-                    new[] { "OneNote (Desktop)", @"\\emp-ps2\FollowMe" }),
-                "Should return null when neither Brother nor Microsoft Print to PDF is installed");
+                    new[] { @"\\emp-ps2\FollowMe" }),
+                "Should return null when no fast local virtual printer is installed");
 
             // Test unit parsing (mm, portrait) and non-mutating temp .lbx rewrite.
             WithTempDir(tempRoot =>
@@ -571,8 +590,14 @@ namespace OpenBISLabelStudio.Tests
             WithTempDir(tempRoot =>
             {
                 string outPng = Path.Combine(tempRoot, "worker_out.png");
+                string warmupJson = Newtonsoft.Json.JsonConvert.SerializeObject(new
+                {
+                    action = "warmup",
+                    baseDir = tempRoot
+                });
                 string reqJson = Newtonsoft.Json.JsonConvert.SerializeObject(new
                 {
+                    action = "render",
                     baseDir = tempRoot,
                     slot = "SmallBox12mm",
                     profile = "Molecule",
@@ -580,20 +605,86 @@ namespace OpenBISLabelStudio.Tests
                     freeText = "",
                     outPath = outPng
                 });
+                string printErrJson = Newtonsoft.Json.JsonConvert.SerializeObject(new
+                {
+                    action = "print",
+                    baseDir = tempRoot,
+                    profile = "Molecule",
+                    details = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule),
+                    jobs = new[]
+                    {
+                        new { slot = "SmallBox12mm", labelName = "Small Box 12mm Label", printerName = "Missing Printer", freeText = "" }
+                    }
+                });
 
-                string inputLines = "not-valid-json\n" + reqJson + "\n";
+                string inputLines = "not-valid-json\n" + warmupJson + "\n" + reqJson + "\n" + printErrJson + "\n";
                 using var reader = new StringReader(inputLines);
                 using var writer = new StringWriter();
 
                 LabelPreviewRenderer.RunPreviewWorkerLoop(reader, writer);
 
                 string[] responses = writer.ToString().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                AssertEqual(2, responses.Length, "Worker should emit one JSON response per request line before EOF");
+                AssertEqual(4, responses.Length, "Worker should emit one JSON response per request line before EOF");
                 AssertTrue(responses[0].Contains("\"success\":false", StringComparison.OrdinalIgnoreCase),
                     $"Malformed line should yield success:false, actual: {responses[0]}");
                 AssertTrue(responses[1].Contains("\"success\":true", StringComparison.OrdinalIgnoreCase),
-                    $"Valid request should yield success:true fallback PNG, actual: {responses[1]}");
+                    $"Warmup action should yield success:true, actual: {responses[1]}");
+                AssertTrue(responses[2].Contains("\"success\":true", StringComparison.OrdinalIgnoreCase),
+                    $"Valid render request should yield success:true fallback PNG, actual: {responses[2]}");
+                AssertTrue(responses[3].Contains("\"success\":false", StringComparison.OrdinalIgnoreCase),
+                    $"Missing template print job should yield success:false, actual: {responses[3]}");
                 AssertTrue(File.Exists(outPng), "Worker must write rendered/fallback PNG to outPath");
+            });
+        }
+
+        private static void PrintLabelsValidatesPrintersAndTemplatesSafely()
+        {
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                var sample = LabelPreviewRenderer.BuildExampleSampleDetails(LabelTemplateProfile.Molecule);
+
+                var rendererNoTemplate = new LabelPreviewRenderer(configService, () => new[] { "Brother PT-P700" });
+                LabelPrintBatchResult missingTemplateRes = rendererNoTemplate.PrintLabelsAsync(
+                    LabelTemplateProfile.Molecule,
+                    sample,
+                    new[]
+                    {
+                        new LabelPrintJobRequest
+                        {
+                            Slot = LabelTemplateType.SmallBox12mm,
+                            LabelName = "Small Box 12mm Label",
+                            PrinterName = "Brother PT-P700"
+                        }
+                    }).GetAwaiter().GetResult();
+
+                AssertFalse(missingTemplateRes.AllSucceeded, "PrintLabelsAsync must fail when template .lbx file is missing");
+                AssertTrue(missingTemplateRes.Error.Contains("missing", StringComparison.OrdinalIgnoreCase),
+                    $"Expected missing template error message, actual: {missingTemplateRes.Error}");
+
+                // Create template file, then confirm an uninstalled printer fails safely without falling back to default printer.
+                Directory.CreateDirectory(configService.TemplatesDirectoryPath);
+                File.WriteAllText(
+                    configService.GetTemplateFilePath(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Molecule),
+                    "placeholder");
+
+                var rendererMissingPrinter = new LabelPreviewRenderer(configService, () => new[] { "OneNote (Desktop)" });
+                LabelPrintBatchResult missingPrinterRes = rendererMissingPrinter.PrintLabelsAsync(
+                    LabelTemplateProfile.Molecule,
+                    sample,
+                    new[]
+                    {
+                        new LabelPrintJobRequest
+                        {
+                            Slot = LabelTemplateType.SmallBox12mm,
+                            LabelName = "Small Box 12mm Label",
+                            PrinterName = "Missing Brother Printer"
+                        }
+                    }).GetAwaiter().GetResult();
+
+                AssertFalse(missingPrinterRes.AllSucceeded, "PrintLabelsAsync must reject printers absent from installed queues");
+                AssertTrue(missingPrinterRes.Error.Contains("not installed", StringComparison.OrdinalIgnoreCase),
+                    $"Expected not-installed error message, actual: {missingPrinterRes.Error}");
             });
         }
 
@@ -722,6 +813,14 @@ namespace OpenBISLabelStudio.Tests
                     installedPrintersProvider: () => Array.Empty<string>()))
                 {
                     AssertEqual(SetupDialogMode.Settings, settingsForm.Mode, "Expected Settings mode");
+                    var tabObjectTypes = FindControl<Button>(settingsForm, "btnTabObjectTypes");
+                    var lblWizardTitle = FindControl<Label>(settingsForm, "lblWizardTitle");
+                    var prgTypes = FindControl<ProgressBar>(settingsForm, "prgTypesLoading");
+                    var prgConn = FindControl<ProgressBar>(settingsForm, "prgConnectionLoading");
+                    AssertFalse(tabObjectTypes.UseMnemonic, "Tab button must disable UseMnemonic so '&' does not turn into an extra space");
+                    AssertFalse(lblWizardTitle.UseMnemonic, "Wizard title must disable UseMnemonic so '&' renders cleanly");
+                    AssertFalse(prgTypes.Visible, "Types loading bar should start hidden");
+                    AssertFalse(prgConn.Visible, "Connection loading bar should start hidden");
                     ShowOffscreen(settingsForm);
                     var warningLabel = FindControl<Label>(settingsForm, "lblNoPrintersWarning");
                     AssertTrue(warningLabel.Visible, "Zero-printer warning label must be visible in Settings Printer Routing tab");
@@ -1101,6 +1200,7 @@ namespace OpenBISLabelStudio.Tests
             Button btnPrint = FindControl<Button>(form, "btnPrintLabel");
             Button btnSettings = FindControl<Button>(form, "btnSettings");
             Label lblStatus = FindControl<Label>(form, "lblStatusNotice");
+            ProgressBar prgLoading = FindControl<ProgressBar>(form, "prgLoading");
             ComboBox cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
             GroupBox grpBox = FindControl<GroupBox>(form, "smallBoxLabelGroupBox");
             GroupBox grpMagnet = FindControl<GroupBox>(form, "magnetLabelGroupBox");
@@ -1108,17 +1208,24 @@ namespace OpenBISLabelStudio.Tests
 
             AssertEqual("Settings...", btnSettings.Text, "Settings button text mismatch");
             AssertTrue(btnSettings.Enabled, "Settings button must be enabled");
+            AssertFalse(prgLoading.Visible, "Main loading bar should start hidden");
 
             Rectangle clientBounds = new Rectangle(Point.Empty, form.ClientSize);
             AssertTrue(clientBounds.Contains(btnLoad.Bounds), $"Load button outside ClientSize: {btnLoad.Bounds}");
             AssertTrue(clientBounds.Contains(btnPrint.Bounds), $"Print button outside ClientSize: {btnPrint.Bounds}");
             AssertTrue(clientBounds.Contains(btnSettings.Bounds), $"Settings button outside ClientSize: {btnSettings.Bounds}");
             AssertTrue(clientBounds.Contains(lblStatus.Bounds), $"Status notice label outside ClientSize: {lblStatus.Bounds}");
+            AssertTrue(clientBounds.Contains(prgLoading.Bounds), $"Loading bar outside ClientSize: {prgLoading.Bounds}");
 
             AssertFalse(btnLoad.Bounds.IntersectsWith(btnPrint.Bounds), "Load and Print buttons must not overlap");
             AssertFalse(btnLoad.Bounds.IntersectsWith(btnSettings.Bounds), "Load and Settings buttons must not overlap");
             AssertFalse(btnPrint.Bounds.IntersectsWith(btnSettings.Bounds), "Print and Settings buttons must not overlap");
             AssertFalse(lblStatus.Bounds.IntersectsWith(cmbObjects.Bounds), "Status notice must not overlap objects dropdown");
+            AssertFalse(lblStatus.Bounds.IntersectsWith(prgLoading.Bounds), "Status notice must not overlap loading bar");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(cmbObjects.Bounds), "Loading bar must not overlap objects dropdown");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(grpBox.Bounds), "Loading bar must not overlap Small Box group");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(grpMagnet.Bounds), "Loading bar must not overlap Magnet group");
+            AssertFalse(prgLoading.Bounds.IntersectsWith(grpFlask.Bounds), "Loading bar must not overlap Flask group");
             AssertFalse(lblStatus.Bounds.IntersectsWith(grpBox.Bounds), "Status notice must not overlap Small Box group");
             AssertFalse(lblStatus.Bounds.IntersectsWith(grpMagnet.Bounds), "Status notice must not overlap Magnet group");
             AssertFalse(lblStatus.Bounds.IntersectsWith(grpFlask.Bounds), "Status notice must not overlap Flask group");

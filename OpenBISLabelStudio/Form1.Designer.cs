@@ -39,6 +39,7 @@ namespace OpenBISLabelStudio
             selectedOpenbisTypeLabel = new Label();
             openbisObjectsComboBox = new ComboBox();
             lblStatusNotice = new Label();
+            prgLoading = new ProgressBar();
             loadPrintTemplates = new Button();
             btnPrintLabel = new Button();
             btnSettings = new Button();
@@ -113,9 +114,19 @@ namespace OpenBISLabelStudio
             lblStatusNotice.ForeColor = Color.FromArgb(180, 83, 9);
             lblStatusNotice.Location = new Point(40, 92);
             lblStatusNotice.Name = "lblStatusNotice";
-            lblStatusNotice.Size = new Size(1000, 20);
+            lblStatusNotice.Size = new Size(810, 20);
             lblStatusNotice.TabIndex = 10;
             lblStatusNotice.Visible = false;
+            // 
+            // prgLoading
+            // 
+            prgLoading.Location = new Point(860, 95);
+            prgLoading.MarqueeAnimationSpeed = 25;
+            prgLoading.Name = "prgLoading";
+            prgLoading.Size = new Size(180, 14);
+            prgLoading.Style = ProgressBarStyle.Marquee;
+            prgLoading.TabIndex = 11;
+            prgLoading.Visible = false;
             // 
             // loadPrintTemplates
             // 
@@ -352,6 +363,7 @@ namespace OpenBISLabelStudio
             Controls.Add(btnSettings);
             Controls.Add(btnPrintLabel);
             Controls.Add(loadPrintTemplates);
+            Controls.Add(prgLoading);
             Controls.Add(lblStatusNotice);
             Controls.Add(openbisObjectsComboBox);
             Controls.Add(selectedOpenbisTypeLabel);
@@ -381,6 +393,7 @@ namespace OpenBISLabelStudio
         private Label selectedOpenbisTypeLabel;
         private ComboBox openbisObjectsComboBox;
         private Label lblStatusNotice;
+        private ProgressBar prgLoading;
         private Button loadPrintTemplates;
         private Button btnPrintLabel;
         private Button btnSettings;

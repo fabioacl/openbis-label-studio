@@ -37,6 +37,9 @@ namespace OpenBISLabelStudio
         private long _typeRefreshRequestVersion;
         private long _typeSelectionRequestVersion;
         private long _sampleDetailsRequestVersion;
+        private string? _loadingStatusMessage;
+        private string _persistentNoticeMessage = "";
+        private string? _persistentNoticeTooltip;
 
         public Form1()
             : this(new AppConfigService())
@@ -165,6 +168,7 @@ namespace OpenBISLabelStudio
             PopulateInstalledPrinters();
             PopulateOpenBisTypeComboBox(preferredTypeCode: null);
             UpdateFreeTextControlsState();
+            _previewRenderer.WarmUpWorkerInBackground();
 
             if (cachedWizardServerTypes != null)
             {
@@ -597,12 +601,14 @@ namespace OpenBISLabelStudio
             {
                 ++_typeSelectionRequestVersion;
                 ++_sampleDetailsRequestVersion;
+                SetSampleQueryControlsEnabled(true);
                 selectedOpenbisTypeLabel.Text = "Type:";
                 openbisObjectsComboBox.Items.Clear();
                 _loadedSamples.Clear();
                 _currentSelectedTypeCode = "";
                 ClearAllPreviews();
                 UpdateFreeTextControlsState();
+                ClearLoadingFeedback();
                 return;
             }
 
@@ -617,12 +623,15 @@ namespace OpenBISLabelStudio
 
             if (string.IsNullOrWhiteSpace(_config.OpenBisUrl))
             {
+                SetSampleQueryControlsEnabled(true);
+                ClearLoadingFeedback();
                 MessageBox.Show("openBIS URL is missing. Please configure it in Settings...", "Configuration Missing", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             // Allow switching object types or opening Settings even while items for a previous selection load.
             SetSampleQueryControlsEnabled(false);
+            SetLoadingFeedback($"Loading {selectedItem.DisplayText} objects from openBIS...");
 
             try
             {
@@ -667,6 +676,7 @@ namespace OpenBISLabelStudio
             {
                 if (!IsDisposed && !Disposing && requestVersion == _typeSelectionRequestVersion)
                 {
+                    ClearLoadingFeedback();
                     SetSampleQueryControlsEnabled(true);
                 }
             }
@@ -685,14 +695,16 @@ namespace OpenBISLabelStudio
 
             SampleDto selectedSample = _loadedSamples[openbisObjectsComboBox.SelectedIndex];
             long requestVersion = ++_sampleDetailsRequestVersion;
+            bool skipElnPreview = ResolveTemplateProfile(_currentSelectedTypeCode, _configuredTypes, null) == LabelTemplateProfile.Generic;
 
             // Allow switching object types or opening Settings even while items for a previous selection load.
             SetSampleQueryControlsEnabled(false);
+            SetLoadingFeedback($"Loading details for {selectedSample.Name}...");
 
             try
             {
                 (bool shouldProceed, _, OpenBisDetailsResult? result) = await ExecuteWithExpiredTokenRecoveryAsync(
-                    (url, token) => _openBisClient.QuerySampleDetailsAsync(url, token, selectedSample.PermId),
+                    (url, token) => _openBisClient.QuerySampleDetailsAsync(url, token, selectedSample.PermId, skipElnPreview),
                     r => r.Success,
                     r => r.ErrorType,
                     r => r.Error,
@@ -711,12 +723,14 @@ namespace OpenBISLabelStudio
                     LabelTemplateProfile activeProfile = GetActiveTemplateProfile();
                     UpdateFreeTextControlsState();
 
-                    RenderAllSlotPreviews(activeProfile, _currentSampleDetails);
-
                     // Automatically check all preview checkboxes for convenience
                     smallBoxLabelCheckBox.Checked = true;
                     magnetLabelCheckBox.Checked = true;
                     flaskLabelCheckBox.Checked = true;
+
+                    SetSampleQueryControlsEnabled(true);
+                    SetLoadingFeedback("Rendering label previews...");
+                    await RenderAllSlotPreviewsAsync(activeProfile, _currentSampleDetails);
                 }
                 else
                 {
@@ -731,8 +745,8 @@ namespace OpenBISLabelStudio
             {
                 if (!IsDisposed && !Disposing && requestVersion == _sampleDetailsRequestVersion)
                 {
-                    SetControlsEnabled(true);
-                    Cursor = Cursors.Default;
+                    ClearLoadingFeedback();
+                    SetSampleQueryControlsEnabled(true);
                 }
             }
         }
@@ -788,12 +802,18 @@ namespace OpenBISLabelStudio
 
         private void RenderAllSlotPreviews(LabelTemplateProfile profile, SampleDetailsDto details)
         {
+            _ = RenderAllSlotPreviewsAsync(profile, details);
+        }
+
+        private Task RenderAllSlotPreviewsAsync(LabelTemplateProfile profile, SampleDetailsDto details)
+        {
             string magnetFreeText = profile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : "";
             string flaskFreeText = profile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : "";
 
-            _ = RenderSlotPreviewAsync(smallBoxLabelPreview, LabelTemplateType.SmallBox12mm, profile, details, "");
-            _ = RenderSlotPreviewAsync(magnetLabelPreview, LabelTemplateType.Magnet12mm, profile, details, magnetFreeText);
-            _ = RenderSlotPreviewAsync(flaskLabelPreview, LabelTemplateType.Flask24mm, profile, details, flaskFreeText);
+            return Task.WhenAll(
+                RenderSlotPreviewAsync(smallBoxLabelPreview, LabelTemplateType.SmallBox12mm, profile, details, ""),
+                RenderSlotPreviewAsync(magnetLabelPreview, LabelTemplateType.Magnet12mm, profile, details, magnetFreeText),
+                RenderSlotPreviewAsync(flaskLabelPreview, LabelTemplateType.Flask24mm, profile, details, flaskFreeText));
         }
 
         private async Task RenderSlotPreviewAsync(
@@ -941,18 +961,52 @@ namespace OpenBISLabelStudio
             btnSettings.Enabled = enabled;
         }
 
+        private void SetLoadingFeedback(string message)
+        {
+            _loadingStatusMessage = message;
+            prgLoading.Visible = true;
+            lblStatusNotice.ForeColor = Color.FromArgb(29, 78, 216);
+            lblStatusNotice.Text = message;
+            lblStatusNotice.Visible = true;
+            _statusToolTip.SetToolTip(lblStatusNotice, message);
+        }
+
+        private void ClearLoadingFeedback()
+        {
+            _loadingStatusMessage = null;
+            prgLoading.Visible = false;
+            ApplyPersistentNoticeVisuals();
+        }
+
         private void ShowStatusNotice(string message, string? tooltipDetail = null)
         {
-            lblStatusNotice.Text = message;
-            lblStatusNotice.Visible = !string.IsNullOrWhiteSpace(message);
-            _statusToolTip.SetToolTip(lblStatusNotice, string.IsNullOrWhiteSpace(tooltipDetail) ? message : tooltipDetail);
+            _persistentNoticeMessage = message ?? "";
+            _persistentNoticeTooltip = tooltipDetail;
+            if (string.IsNullOrEmpty(_loadingStatusMessage))
+            {
+                ApplyPersistentNoticeVisuals();
+            }
         }
 
         private void ClearStatusNotice()
         {
-            lblStatusNotice.Text = "";
-            lblStatusNotice.Visible = false;
-            _statusToolTip.SetToolTip(lblStatusNotice, null);
+            _persistentNoticeMessage = "";
+            _persistentNoticeTooltip = null;
+            if (string.IsNullOrEmpty(_loadingStatusMessage))
+            {
+                ApplyPersistentNoticeVisuals();
+            }
+        }
+
+        private void ApplyPersistentNoticeVisuals()
+        {
+            bool hasNotice = !string.IsNullOrWhiteSpace(_persistentNoticeMessage);
+            lblStatusNotice.ForeColor = Color.FromArgb(180, 83, 9);
+            lblStatusNotice.Text = _persistentNoticeMessage;
+            lblStatusNotice.Visible = hasNotice;
+            _statusToolTip.SetToolTip(
+                lblStatusNotice,
+                !hasNotice ? null : (string.IsNullOrWhiteSpace(_persistentNoticeTooltip) ? _persistentNoticeMessage : _persistentNoticeTooltip));
         }
 
         private static string FormatOpenBisError(string? error, string fallback)
@@ -961,9 +1015,9 @@ namespace OpenBISLabelStudio
         }
 
         // =========================================================================
-        // PRINT LABELS BUTTON CLICK (SELECTED PRINTER ROUTING INFO)
+        // PRINT LABELS BUTTON CLICK (SEND SELECTED LABELS VIA b-PAC)
         // =========================================================================
-        private void btnPrintLabel_Click_1(object sender, EventArgs e)
+        private async void btnPrintLabel_Click_1(object sender, EventArgs e)
         {
             if (_currentSampleDetails == null)
             {
@@ -972,49 +1026,104 @@ namespace OpenBISLabelStudio
             }
 
             LabelTemplateProfile activeProfile = GetActiveTemplateProfile();
-            var queuedJobs = new List<(LabelTemplateType Slot, string LabelName, string AssignedPrinter)>();
+            var printJobs = new List<LabelPrintJobRequest>();
 
             if (smallBoxLabelCheckBox.Checked)
             {
                 string printer = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.SmallBoxPrinter;
-                queuedJobs.Add((LabelTemplateType.SmallBox12mm, "Small Box 12mm Label", printer));
+                printJobs.Add(new LabelPrintJobRequest
+                {
+                    Slot = LabelTemplateType.SmallBox12mm,
+                    LabelName = "Small Box 12mm Label",
+                    PrinterName = printer,
+                    FreeText = ""
+                });
             }
 
             if (magnetLabelCheckBox.Checked)
             {
                 string printer = magnetPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.MagnetPrinter;
-                queuedJobs.Add((LabelTemplateType.Magnet12mm, "Magnet 12mm Label", printer));
+                printJobs.Add(new LabelPrintJobRequest
+                {
+                    Slot = LabelTemplateType.Magnet12mm,
+                    LabelName = "Magnet 12mm Label",
+                    PrinterName = printer,
+                    FreeText = activeProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : ""
+                });
             }
 
             if (flaskLabelCheckBox.Checked)
             {
                 string printer = flaskPrinterComboBox.SelectedItem?.ToString() ?? _printerConfig.FlaskPrinter;
-                queuedJobs.Add((LabelTemplateType.Flask24mm, "Flask 24mm Label", printer));
+                printJobs.Add(new LabelPrintJobRequest
+                {
+                    Slot = LabelTemplateType.Flask24mm,
+                    LabelName = "Flask 24mm Label",
+                    PrinterName = printer,
+                    FreeText = activeProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : ""
+                });
             }
 
-            if (queuedJobs.Count == 0)
+            if (printJobs.Count == 0)
             {
                 MessageBox.Show("Please select at least one label template to print (check the box at the top-right of the label).", "No Label Selected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            var sb = new StringBuilder();
-            sb.AppendLine($"Sample: {_currentSampleDetails.Name} ({_currentSampleDetails.PermId})");
-            sb.AppendLine($"Template Profile: {activeProfile}");
-            sb.AppendLine();
-            sb.AppendLine("The selected templates are configured to be sent to the following user-selected printers:");
-            sb.AppendLine();
+            SampleDetailsDto sampleSnapshot = _currentSampleDetails;
+            SetSampleQueryControlsEnabled(false);
+            SetLoadingFeedback($"Printing {printJobs.Count} label(s)...");
 
-            foreach (var job in queuedJobs)
+            try
             {
-                string templateFileName = Path.GetFileName(_configService.GetTemplateFilePath(job.Slot, activeProfile));
-                sb.AppendLine($"  • {job.LabelName} ({templateFileName})  ➔  [{job.AssignedPrinter}]");
+                LabelPrintBatchResult batchResult = await _previewRenderer.PrintLabelsAsync(activeProfile, sampleSnapshot, printJobs);
+                if (IsDisposed || Disposing)
+                {
+                    return;
+                }
+
+                ClearLoadingFeedback();
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"Sample: {sampleSnapshot.Name} ({sampleSnapshot.PermId})");
+                sb.AppendLine($"Template Profile: {activeProfile}");
+                sb.AppendLine();
+
+                foreach (LabelPrintJobResult job in batchResult.Jobs)
+                {
+                    string statusText = job.Success
+                        ? $"Sent to [{job.PrinterName}]"
+                        : $"FAILED [{job.PrinterName}]: {job.Error}";
+                    sb.AppendLine($"  • {job.LabelName}  ➔  {statusText}");
+                }
+
+                if (batchResult.Jobs.Count == 0 && !string.IsNullOrWhiteSpace(batchResult.Error))
+                {
+                    sb.AppendLine(batchResult.Error);
+                }
+
+                MessageBox.Show(
+                    sb.ToString(),
+                    batchResult.AllSucceeded ? "Print Complete" : "Print Error",
+                    MessageBoxButtons.OK,
+                    batchResult.AllSucceeded ? MessageBoxIcon.Information : MessageBoxIcon.Error);
             }
-
-            sb.AppendLine();
-            sb.AppendLine("(Note: Direct printing is paused as requested.)");
-
-            MessageBox.Show(sb.ToString(), "Printer Routing & Queue", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing)
+                {
+                    ClearLoadingFeedback();
+                    MessageBox.Show($"Unexpected error while printing labels: {ex.Message}", "Print Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            finally
+            {
+                if (!IsDisposed && !Disposing)
+                {
+                    ClearLoadingFeedback();
+                    SetSampleQueryControlsEnabled(true);
+                }
+            }
         }
 
         private void btnSettings_Click(object? sender, EventArgs e)

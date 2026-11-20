@@ -180,3 +180,91 @@ def test_main_no_arguments_writes_results_file_and_returns_1(tmp_path, monkeypat
     assert data["success"] is False
     assert data["errorType"] == "unknown_error"
 
+
+def test_check_connection_uses_is_session_active_without_loading_sample_types(monkeypatch):
+    resp_ok = MagicMock()
+    resp_ok.json.return_value = {"jsonrpc": "2.0", "id": "1", "result": True}
+    resp_ok.raise_for_status.return_value = None
+
+    with patch.object(openbis_fetch.requests, "post", return_value=resp_ok) as mock_post:
+        res_ok = openbis_fetch.check_connection("https://openbis.example.org/", "tok-valid")
+
+    assert res_ok == {"success": True, "sessionActive": True}
+    mock_post.assert_called_once()
+    called_url = mock_post.call_args.args[0]
+    called_json = mock_post.call_args.kwargs["json"]
+    assert called_url == "https://openbis.example.org/openbis/openbis/rmi-application-server-v3.json"
+    assert called_json["method"] == "isSessionActive"
+    assert called_json["params"] == ["tok-valid"]
+
+    resp_false = MagicMock()
+    resp_false.json.return_value = {"jsonrpc": "2.0", "id": "1", "result": False}
+    resp_false.raise_for_status.return_value = None
+    with patch.object(openbis_fetch.requests, "post", return_value=resp_false):
+        res_expired = openbis_fetch.check_connection("https://openbis.example.org", "tok-expired")
+    assert res_expired["success"] is False
+    assert res_expired["errorType"] == "token_expired"
+
+    res_empty = openbis_fetch.check_connection("https://openbis.example.org", "   ")
+    assert res_empty["success"] is False
+    assert res_empty["errorType"] == "token_expired"
+
+    res_http = openbis_fetch.check_connection("http://openbis.example.org", "tok")
+    assert res_http["success"] is False
+    assert res_http["errorType"] == "connection_error"
+
+
+def test_fetch_sample_details_uses_cached_eln_preview_and_respects_skip_eln(tmp_path):
+    cache_root = tmp_path / "openbis_eln_cache" / "DS-CACHE-1"
+    cache_root.mkdir(parents=True)
+    cached_png = cache_root / "structure.png"
+    cached_png.write_bytes(b"png-bytes")
+
+    parent_sample = MagicMock()
+    parent_sample.type = "MOLECULE"
+    ds = MagicMock()
+    ds.type = "ELN_PREVIEW"
+    ds.permId = "DS-CACHE-1"
+    parent_sample.get_datasets.return_value = [ds]
+
+    sample = MagicMock()
+    sample.permId = "SMP-1"
+    sample.type = "SUBSTANCE"
+    sample.props.return_value = {"empa_number": "EMPA-1", "batch": "A"}
+    sample.parents = ["MOLE-1"]
+
+    client = MagicMock()
+    client.get_sample.side_effect = lambda pid: sample if pid == "SMP-1" else parent_sample
+
+    with patch.object(openbis_fetch, "create_openbis_connection", return_value=client):
+        with patch.object(openbis_fetch.tempfile, "gettempdir", return_value=str(tmp_path)):
+            res_cached = openbis_fetch.fetch_sample_details("https://x", "tok", "SMP-1")
+            assert res_cached["success"] is True
+            assert res_cached["details"]["elnPreviewPath"] == str(cached_png.resolve())
+            ds.download.assert_not_called()
+
+            client.get_sample.reset_mock()
+            parent_sample.get_datasets.reset_mock()
+            res_skipped = openbis_fetch.fetch_sample_details("https://x", "tok", "SMP-1", skip_eln=True)
+            assert res_skipped["success"] is True
+            assert res_skipped["details"]["elnPreviewPath"] == ""
+            client.get_sample.assert_called_once_with("SMP-1")
+            parent_sample.get_datasets.assert_not_called()
+
+
+def test_main_dispatches_check_and_skip_eln_modes(tmp_path):
+    out_check = tmp_path / "check.json"
+    out_details = tmp_path / "details_skip.json"
+
+    with patch.object(openbis_fetch, "check_connection", return_value={"success": True, "sessionActive": True}) as mock_check:
+        code1 = openbis_fetch.main(["openbis_fetch.py", "https://x", "tok", "--check", "--out", str(out_check)])
+    assert code1 == 0
+    mock_check.assert_called_once_with("https://x", "tok")
+    assert json.loads(out_check.read_text(encoding="utf-8")) == {"success": True, "sessionActive": True}
+
+    with patch.object(openbis_fetch, "fetch_sample_details", return_value={"success": True, "details": {}}) as mock_det:
+        code2 = openbis_fetch.main(["openbis_fetch.py", "https://x", "tok", "--details", "PERM-1", "--skip-eln", "--out", str(out_details)])
+    assert code2 == 0
+    mock_det.assert_called_once_with("https://x", "tok", "PERM-1", skip_eln=True)
+
+

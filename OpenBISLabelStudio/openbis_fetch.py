@@ -4,14 +4,26 @@ import os
 import re
 import socket
 import tempfile
+from urllib.parse import urlparse
 import urllib3
 import requests
-from pybis import Openbis
 
 # Disable insecure HTTPS warnings if self-signed certs are used
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 RESULTS_FILE = "openbis_results.json"
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".gif")
+
+# Lazily imported when full pyBIS queries run so fast checks (--check) avoid importing pandas/pybis.
+Openbis = None
+
+
+def _get_openbis_class():
+    global Openbis
+    if Openbis is None:
+        from pybis import Openbis as pybis_openbis
+        Openbis = pybis_openbis
+    return Openbis
 
 
 class InvalidTokenError(Exception):
@@ -67,7 +79,8 @@ def create_openbis_connection(openbis_url, token):
     if not token or not str(token).strip():
         raise InvalidTokenError("Personal access token is empty.")
 
-    o = Openbis(openbis_url, verify_certificates=False)
+    openbis_cls = _get_openbis_class()
+    o = openbis_cls(openbis_url, verify_certificates=False)
     try:
         o.set_token(token, save_token=False)
     except TypeError:
@@ -78,6 +91,60 @@ def create_openbis_connection(openbis_url, token):
         raise InvalidTokenError("Session token is expired or invalid.")
 
     return o
+
+
+def _normalize_openbis_url(openbis_url: str) -> str:
+    raw = str(openbis_url or "").strip()
+    if not raw:
+        raise ValueError("please provide a URL you want to connect to.")
+
+    if not raw.startswith("http"):
+        raw = "https://" + raw
+
+    parsed = urlparse(raw)
+    if not parsed.netloc or not parsed.hostname:
+        raise ValueError("please provide the url in this format: https://openbis.host.ch:8443")
+    if parsed.scheme == "http":
+        raise ValueError("always use https!")
+    if parsed.scheme != "https":
+        raise ValueError("please provide the url in this format: https://openbis.host.ch:8443")
+
+    return parsed.geturl().rstrip("/")
+
+
+def check_connection(openbis_url, token):
+    """
+    Fast openBIS session verification via JSON-RPC isSessionActive without importing pybis
+    or enumerating object types.
+    """
+    try:
+        if not token or not str(token).strip():
+            raise InvalidTokenError("Personal access token is empty.")
+
+        base_url = _normalize_openbis_url(openbis_url)
+        endpoint = base_url + "/openbis/openbis/rmi-application-server-v3.json"
+        payload = {
+            "id": "1",
+            "jsonrpc": "2.0",
+            "method": "isSessionActive",
+            "params": [str(token).strip()],
+        }
+
+        resp = requests.post(endpoint, json=payload, verify=False, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if isinstance(data, dict) and data.get("error"):
+            err = data["error"]
+            err_msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise Exception(err_msg or "openBIS connection check failed.")
+
+        if isinstance(data, dict) and bool(data.get("result")):
+            return {"success": True, "sessionActive": True}
+
+        raise InvalidTokenError("Session token is expired or invalid.")
+    except Exception as e:
+        return {"success": False, "errorType": classify_error(e), "error": str(e)}
 
 
 def extract_evaporation_temperature(spreadsheet):
@@ -183,7 +250,19 @@ def fetch_samples_by_type(openbis_url, token, sample_type):
         return {"success": False, "errorType": classify_error(e), "error": str(e)}
 
 
-def fetch_sample_details(openbis_url, token, perm_id):
+def _find_first_image_file(directory: str) -> str:
+    if not directory or not os.path.exists(directory):
+        return ""
+
+    for root, _, files in os.walk(directory):
+        for file in sorted(files):
+            if file.lower().endswith(IMAGE_EXTENSIONS):
+                return os.path.abspath(os.path.join(root, file))
+
+    return ""
+
+
+def fetch_sample_details(openbis_url, token, perm_id, skip_eln: bool = False):
     try:
         o = create_openbis_connection(openbis_url, token)
 
@@ -267,8 +346,8 @@ def fetch_sample_details(openbis_url, token, perm_id):
 
         # 6. Parent MOLECULE & ELN Preview Image Download
         eln_preview_path = ""
-        molecule_parent = None
-        if sample.parents:
+        if not skip_eln and sample.parents:
+            molecule_parent = None
             for p in sample.parents:
                 try:
                     p_sample = o.get_sample(p) if isinstance(p, str) else p
@@ -281,26 +360,21 @@ def fetch_sample_details(openbis_url, token, perm_id):
                 except Exception:
                     pass
 
-        if molecule_parent:
-            try:
-                datasets = molecule_parent.get_datasets()
-                for ds in datasets:
-                    if str(getattr(ds, 'type', '')).upper() == "ELN_PREVIEW":
-                        temp_dir = os.path.join(tempfile.gettempdir(), "openbis_eln_cache")
-                        os.makedirs(temp_dir, exist_ok=True)
-                        ds.download(destination=temp_dir, wait_until_finished=True)
-                        ds_dir = os.path.join(temp_dir, ds.permId)
-                        if os.path.exists(ds_dir):
-                            for root, dirs, files in os.walk(ds_dir):
-                                for file in files:
-                                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                                        eln_preview_path = os.path.abspath(os.path.join(root, file))
-                                        break
-                                if eln_preview_path:
-                                    break
-                        break
-            except Exception:
-                pass
+            if molecule_parent:
+                try:
+                    datasets = molecule_parent.get_datasets()
+                    for ds in datasets:
+                        if str(getattr(ds, 'type', '')).upper() == "ELN_PREVIEW":
+                            temp_dir = os.path.join(tempfile.gettempdir(), "openbis_eln_cache")
+                            ds_dir = os.path.join(temp_dir, ds.permId)
+                            eln_preview_path = _find_first_image_file(ds_dir)
+                            if not eln_preview_path:
+                                os.makedirs(temp_dir, exist_ok=True)
+                                ds.download(destination=temp_dir, wait_until_finished=True)
+                                eln_preview_path = _find_first_image_file(ds_dir)
+                            break
+                except Exception:
+                    pass
 
         details = {
             "permId": str(sample.permId or ""),
@@ -328,11 +402,11 @@ def parse_cli_args(argv: list[str]) -> tuple[str, str, str, str | None, str]:
     """
     Parses CLI arguments.
     Usage:
-      python openbis_fetch.py <url> <token> (--types | <sample_type> | --details <perm_id>) [--out <json_path>]
+      python openbis_fetch.py <url> <token> (--check | --types | <sample_type> | --details <perm_id> [--skip-eln]) [--out <json_path>]
     Returns:
       (url, token, mode_or_type, perm_id, out_path)
     """
-    args = list(argv)
+    args = [arg for arg in argv if arg != "--skip-eln"]
     if args and (args[0].endswith(".py") or args[0] in ("python", "python3") or args[0].endswith("python.exe")):
         args = args[1:]
 
@@ -369,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv
 
+    skip_eln = "--skip-eln" in argv
+
     # Detect --out early if present, so argument errors can be written to the requested path
     out_path = RESULTS_FILE
     if "--out" in argv:
@@ -396,10 +472,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        if mode_or_type == "--types":
+        if mode_or_type == "--check":
+            result = check_connection(url, token)
+        elif mode_or_type == "--types":
             result = fetch_sample_types(url, token)
         elif mode_or_type == "--details":
-            result = fetch_sample_details(url, token, perm_id)
+            result = fetch_sample_details(url, token, perm_id, skip_eln=True) if skip_eln else fetch_sample_details(url, token, perm_id)
         else:
             sample_type = mode_or_type
             result = fetch_samples_by_type(url, token, sample_type)

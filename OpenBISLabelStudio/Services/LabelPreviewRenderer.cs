@@ -39,6 +39,7 @@ namespace OpenBISLabelStudio.Services
         private static Process? s_workerProcess;
         private static StreamWriter? s_workerIn;
         private static StreamReader? s_workerOut;
+        private static bool s_warmupQueued;
 
         static LabelPreviewRenderer()
         {
@@ -146,8 +147,116 @@ namespace OpenBISLabelStudio.Services
             }
         }
 
+        /// <summary>
+        /// Pre-warms the background --preview-worker process and b-PAC COM component asynchronously
+        /// so opening Page 2 previews or clicking Load Templates does not hit cold COM startup.
+        /// </summary>
+        public void WarmUpWorkerInBackground()
+        {
+            if (_installedPrintersProvider != null)
+            {
+                return;
+            }
+
+            string? workerExe = ResolvePreviewWorkerExecutablePath();
+            if (string.IsNullOrEmpty(workerExe))
+            {
+                return;
+            }
+
+            lock (WorkerLifecycleLock)
+            {
+                if (s_warmupQueued)
+                {
+                    return;
+                }
+
+                s_warmupQueued = true;
+            }
+
+            string baseDir = Path.GetDirectoryName(_configService.TemplatesDirectoryPath) ?? AppDomain.CurrentDomain.BaseDirectory;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendWorkerRequestAsync(
+                        workerExe,
+                        new PreviewWorkerRequest { Action = "warmup", BaseDir = baseDir },
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort warmup; render/print calls recover cleanly on demand.
+                }
+            });
+        }
+
+        /// <summary>
+        /// Prints one or more label slots directly to their configured printers off the UI thread.
+        /// </summary>
+        public async Task<LabelPrintBatchResult> PrintLabelsAsync(
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            IReadOnlyList<LabelPrintJobRequest> jobs,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(details);
+            ArgumentNullException.ThrowIfNull(jobs);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (jobs.Count == 0)
+            {
+                return new LabelPrintBatchResult
+                {
+                    AllSucceeded = false,
+                    Error = "No label templates selected for printing."
+                };
+            }
+
+            if (_installedPrintersProvider == null)
+            {
+                string? workerExe = ResolvePreviewWorkerExecutablePath();
+                if (!string.IsNullOrEmpty(workerExe))
+                {
+                    return await PrintViaWorkerProcessAsync(workerExe, profile, details, jobs, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            await StaRenderGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var tcs = new TaskCompletionSource<LabelPrintBatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var staThread = new Thread(() =>
+                {
+                    try
+                    {
+                        tcs.TrySetResult(PrintLabelsBatch(profile, details, jobs));
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                    }
+                })
+                {
+                    IsBackground = true,
+                    Name = "bPACPrintWorker"
+                };
+                staThread.SetApartmentState(ApartmentState.STA);
+                staThread.Start();
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                StaRenderGate.Release();
+            }
+        }
+
         private sealed class PreviewWorkerRequest
         {
+            [JsonProperty("action")]
+            public string Action { get; set; } = "render";
+
             [JsonProperty("baseDir")]
             public string BaseDir { get; set; } = "";
 
@@ -165,6 +274,9 @@ namespace OpenBISLabelStudio.Services
 
             [JsonProperty("outPath")]
             public string OutPath { get; set; } = "";
+
+            [JsonProperty("jobs")]
+            public List<LabelPrintJobRequest>? Jobs { get; set; }
         }
 
         private sealed class PreviewWorkerResponse
@@ -174,10 +286,13 @@ namespace OpenBISLabelStudio.Services
 
             [JsonProperty("error")]
             public string Error { get; set; } = "";
+
+            [JsonProperty("printResult")]
+            public LabelPrintBatchResult? PrintResult { get; set; }
         }
 
         /// <summary>
-        /// Runs the headless single-request-per-line JSON preview loop in the worker child process.
+        /// Runs the headless single-request-per-line JSON preview and print loop in the worker child process.
         /// </summary>
         public static void RunPreviewWorkerLoop(TextReader input, TextWriter output)
         {
@@ -185,6 +300,7 @@ namespace OpenBISLabelStudio.Services
             ArgumentNullException.ThrowIfNull(output);
 
             var renderersByBaseDir = new Dictionary<string, LabelPreviewRenderer>(StringComparer.OrdinalIgnoreCase);
+            bpac.Document? sharedDoc = null;
 
             string? line;
             while ((line = input.ReadLine()) != null)
@@ -198,33 +314,60 @@ namespace OpenBISLabelStudio.Services
                 try
                 {
                     PreviewWorkerRequest? req = JsonConvert.DeserializeObject<PreviewWorkerRequest>(line);
-                    if (req == null || req.Details == null || string.IsNullOrWhiteSpace(req.OutPath))
+                    string action = string.IsNullOrWhiteSpace(req?.Action) ? "render" : req!.Action.Trim().ToLowerInvariant();
+                    string normalizedBaseDir = string.IsNullOrWhiteSpace(req?.BaseDir)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : Path.GetFullPath(req!.BaseDir);
+
+                    if (!renderersByBaseDir.TryGetValue(normalizedBaseDir, out LabelPreviewRenderer? renderer))
+                    {
+                        renderer = new LabelPreviewRenderer(new AppConfigService(normalizedBaseDir));
+                        renderersByBaseDir[normalizedBaseDir] = renderer;
+                    }
+
+                    if (action == "warmup")
+                    {
+                        sharedDoc ??= new bpac.Document();
+                        renderer.WarmUpWithDocument(sharedDoc);
+                        response = new PreviewWorkerResponse { Success = true };
+                    }
+                    else if (action == "print")
+                    {
+                        if (req == null || req.Details == null || req.Jobs == null || req.Jobs.Count == 0)
+                        {
+                            response = new PreviewWorkerResponse { Success = false, Error = "Invalid print worker request payload." };
+                        }
+                        else
+                        {
+                            sharedDoc ??= new bpac.Document();
+                            LabelPrintBatchResult printResult = renderer.PrintLabelsBatch(req.Profile, req.Details, req.Jobs, sharedDoc);
+                            response = new PreviewWorkerResponse
+                            {
+                                Success = printResult.AllSucceeded,
+                                Error = printResult.Error,
+                                PrintResult = printResult
+                            };
+                        }
+                    }
+                    else if (req == null || req.Details == null || string.IsNullOrWhiteSpace(req.OutPath))
                     {
                         response = new PreviewWorkerResponse { Success = false, Error = "Invalid preview worker request payload." };
                     }
                     else
                     {
-                        string normalizedBaseDir = string.IsNullOrWhiteSpace(req.BaseDir)
-                            ? AppDomain.CurrentDomain.BaseDirectory
-                            : Path.GetFullPath(req.BaseDir);
-
-                        if (!renderersByBaseDir.TryGetValue(normalizedBaseDir, out LabelPreviewRenderer? renderer))
-                        {
-                            renderer = new LabelPreviewRenderer(new AppConfigService(normalizedBaseDir));
-                            renderersByBaseDir[normalizedBaseDir] = renderer;
-                        }
-
                         string? outDir = Path.GetDirectoryName(req.OutPath);
                         if (!string.IsNullOrEmpty(outDir))
                         {
                             Directory.CreateDirectory(outDir);
                         }
 
-                        using Image rendered = renderer.RenderTemplatePreview(
+                        sharedDoc ??= new bpac.Document();
+                        using Image rendered = renderer.RenderTemplatePreviewCore(
                             req.Slot,
                             req.Profile,
                             req.Details,
-                            req.FreeText ?? "");
+                            req.FreeText ?? "",
+                            sharedDoc);
                         rendered.Save(req.OutPath, ImageFormat.Png);
 
                         response = new PreviewWorkerResponse { Success = true };
@@ -232,6 +375,7 @@ namespace OpenBISLabelStudio.Services
                 }
                 catch (Exception ex)
                 {
+                    sharedDoc = null;
                     response = new PreviewWorkerResponse { Success = false, Error = ex.Message };
                 }
 
@@ -250,19 +394,11 @@ namespace OpenBISLabelStudio.Services
         {
             string outPath = Path.Combine(Path.GetTempPath(), $"openbis_worker_preview_{slot}_{Guid.NewGuid():N}.png");
 
-            await WorkerPipeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                EnsurePreviewWorkerStarted(workerExePath);
-                if (s_workerIn == null || s_workerOut == null)
-                {
-                    return CreateFallbackPreviewBitmap(slot, profile, "Preview worker failed to start.");
-                }
-
                 var request = new PreviewWorkerRequest
                 {
+                    Action = "render",
                     BaseDir = Path.GetDirectoryName(_configService.TemplatesDirectoryPath) ?? AppDomain.CurrentDomain.BaseDirectory,
                     Slot = slot,
                     Profile = profile,
@@ -271,22 +407,12 @@ namespace OpenBISLabelStudio.Services
                     OutPath = outPath
                 };
 
-                await s_workerIn.WriteLineAsync(JsonConvert.SerializeObject(request)).ConfigureAwait(false);
-                await s_workerIn.FlushAsync().ConfigureAwait(false);
-
-                string? responseLine = await s_workerOut.ReadLineAsync().ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(responseLine))
+                PreviewWorkerResponse response = await SendWorkerRequestAsync(workerExePath, request, cancellationToken).ConfigureAwait(false);
+                if (!response.Success || !File.Exists(outPath))
                 {
-                    ShutdownPreviewWorker();
-                    return CreateFallbackPreviewBitmap(slot, profile, "Preview worker closed unexpectedly.");
-                }
-
-                PreviewWorkerResponse? response = JsonConvert.DeserializeObject<PreviewWorkerResponse>(responseLine);
-                if (response == null || !response.Success || !File.Exists(outPath))
-                {
-                    string reason = string.IsNullOrWhiteSpace(response?.Error)
+                    string reason = string.IsNullOrWhiteSpace(response.Error)
                         ? "Preview worker did not produce an image."
-                        : response!.Error;
+                        : response.Error;
                     return CreateFallbackPreviewBitmap(slot, profile, reason);
                 }
 
@@ -300,12 +426,100 @@ namespace OpenBISLabelStudio.Services
             }
             catch (Exception ex)
             {
-                ShutdownPreviewWorker();
                 return CreateFallbackPreviewBitmap(slot, profile, $"Preview unavailable: {ex.Message}");
             }
             finally
             {
                 TryDeleteTempFile(outPath);
+            }
+        }
+
+        private async Task<LabelPrintBatchResult> PrintViaWorkerProcessAsync(
+            string workerExePath,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            IReadOnlyList<LabelPrintJobRequest> jobs,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var request = new PreviewWorkerRequest
+                {
+                    Action = "print",
+                    BaseDir = Path.GetDirectoryName(_configService.TemplatesDirectoryPath) ?? AppDomain.CurrentDomain.BaseDirectory,
+                    Profile = profile,
+                    Details = details,
+                    Jobs = jobs.ToList()
+                };
+
+                PreviewWorkerResponse response = await SendWorkerRequestAsync(workerExePath, request, cancellationToken).ConfigureAwait(false);
+                if (response.PrintResult != null)
+                {
+                    return response.PrintResult;
+                }
+
+                return new LabelPrintBatchResult
+                {
+                    AllSucceeded = response.Success,
+                    Error = string.IsNullOrWhiteSpace(response.Error)
+                        ? "Print worker returned no result."
+                        : response.Error
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return new LabelPrintBatchResult
+                {
+                    AllSucceeded = false,
+                    Error = $"Printing failed: {ex.Message}"
+                };
+            }
+        }
+
+        private static async Task<PreviewWorkerResponse> SendWorkerRequestAsync(
+            string workerExePath,
+            PreviewWorkerRequest request,
+            CancellationToken cancellationToken)
+        {
+            await WorkerPipeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                EnsurePreviewWorkerStarted(workerExePath);
+                if (s_workerIn == null || s_workerOut == null)
+                {
+                    return new PreviewWorkerResponse { Success = false, Error = "Worker failed to start." };
+                }
+
+                await s_workerIn.WriteLineAsync(JsonConvert.SerializeObject(request)).ConfigureAwait(false);
+                await s_workerIn.FlushAsync().ConfigureAwait(false);
+
+                string? responseLine = await s_workerOut.ReadLineAsync().ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(responseLine))
+                {
+                    ShutdownPreviewWorker();
+                    return new PreviewWorkerResponse { Success = false, Error = "Worker closed unexpectedly." };
+                }
+
+                return JsonConvert.DeserializeObject<PreviewWorkerResponse>(responseLine)
+                       ?? new PreviewWorkerResponse { Success = false, Error = "Worker returned an invalid response." };
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                ShutdownPreviewWorker();
+                throw;
+            }
+            finally
+            {
                 WorkerPipeGate.Release();
             }
         }
@@ -364,7 +578,10 @@ namespace OpenBISLabelStudio.Services
             }
         }
 
-        private static void ShutdownPreviewWorker()
+        /// <summary>
+        /// Stops the background preview/print worker process cleanly.
+        /// </summary>
+        public static void ShutdownPreviewWorker()
         {
             lock (WorkerLifecycleLock)
             {
@@ -374,6 +591,7 @@ namespace OpenBISLabelStudio.Services
 
         private static void ShutdownPreviewWorkerUnsafe()
         {
+            s_warmupQueued = false;
             try
             {
                 s_workerIn?.Dispose();
@@ -431,6 +649,256 @@ namespace OpenBISLabelStudio.Services
             SampleDetailsDto details,
             string freeText = "")
         {
+            return RenderTemplatePreviewCore(slot, profile, details, freeText, reusableDoc: null);
+        }
+
+        private void WarmUpWithDocument(bpac.Document doc)
+        {
+            string templatePath = _configService.GetTemplateFilePath(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Molecule);
+            if (!File.Exists(templatePath))
+            {
+                templatePath = _configService.GetTemplateFilePath(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Generic);
+            }
+
+            if (!File.Exists(templatePath))
+            {
+                return;
+            }
+
+            string? tempOverrideLbx = null;
+            try
+            {
+                TryReadLbxMetadata(templatePath, out _, out _, out string? designedPrinter);
+                string effectiveTemplatePath = templatePath;
+                IReadOnlyList<string> installedPrinters = _installedPrintersProvider?.Invoke() ?? GetSystemInstalledPrinters();
+                string? overridePrinter = SelectPreviewPrinterOverride(designedPrinter, installedPrinters);
+                if (!string.IsNullOrEmpty(overridePrinter))
+                {
+                    tempOverrideLbx = TryCreateTempLbxWithPrinter(templatePath, overridePrinter);
+                    if (!string.IsNullOrEmpty(tempOverrideLbx))
+                    {
+                        effectiveTemplatePath = tempOverrideLbx;
+                    }
+                }
+
+                if (doc.Open(effectiveTemplatePath))
+                {
+                    try
+                    {
+                        doc.Close();
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors during warmup.
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort warmup; render path will recover if needed.
+            }
+            finally
+            {
+                TryDeleteTempFile(tempOverrideLbx);
+            }
+        }
+
+        /// <summary>
+        /// Prints the requested label jobs sequentially via b-PAC, verifying each target printer queue exists
+        /// so missing printers never fall back silently to a default office printer.
+        /// </summary>
+        public LabelPrintBatchResult PrintLabelsBatch(
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            IReadOnlyList<LabelPrintJobRequest> jobs,
+            bpac.Document? reusableDoc = null)
+        {
+            ArgumentNullException.ThrowIfNull(details);
+            ArgumentNullException.ThrowIfNull(jobs);
+
+            IReadOnlyList<string> installedPrinters = _installedPrintersProvider?.Invoke() ?? GetSystemInstalledPrinters();
+            var results = new List<LabelPrintJobResult>(jobs.Count);
+
+            foreach (LabelPrintJobRequest job in jobs)
+            {
+                string requestedPrinter = (job.PrinterName ?? "").Trim();
+                string labelName = string.IsNullOrWhiteSpace(job.LabelName) ? job.Slot.ToString() : job.LabelName;
+                string templatePath = _configService.GetTemplateFilePath(job.Slot, profile);
+
+                if (!File.Exists(templatePath))
+                {
+                    results.Add(new LabelPrintJobResult
+                    {
+                        Slot = job.Slot,
+                        LabelName = labelName,
+                        PrinterName = requestedPrinter,
+                        Success = false,
+                        Error = $"Template file missing: {Path.GetFileName(templatePath)}"
+                    });
+                    continue;
+                }
+
+                string? matchedPrinter = installedPrinters.FirstOrDefault(
+                    p => !string.IsNullOrWhiteSpace(p)
+                         && string.Equals(p.Trim(), requestedPrinter, StringComparison.OrdinalIgnoreCase))?.Trim();
+
+                if (string.IsNullOrEmpty(requestedPrinter) || string.IsNullOrEmpty(matchedPrinter))
+                {
+                    results.Add(new LabelPrintJobResult
+                    {
+                        Slot = job.Slot,
+                        LabelName = labelName,
+                        PrinterName = requestedPrinter,
+                        Success = false,
+                        Error = string.IsNullOrEmpty(requestedPrinter)
+                            ? "No printer selected."
+                            : $"Printer '{requestedPrinter}' is not installed on this computer."
+                    });
+                    continue;
+                }
+
+                bpac.Document? doc = reusableDoc;
+                bool openSucceeded = false;
+                bool startPrintSucceeded = false;
+
+                try
+                {
+                    doc ??= new bpac.Document();
+                    if (!doc.Open(templatePath))
+                    {
+                        results.Add(new LabelPrintJobResult
+                        {
+                            Slot = job.Slot,
+                            LabelName = labelName,
+                            PrinterName = matchedPrinter,
+                            Success = false,
+                            Error = $"Could not open template '{Path.GetFileName(templatePath)}'."
+                        });
+                        continue;
+                    }
+                    openSucceeded = true;
+
+                    doc.SetPrinter(matchedPrinter, false);
+                    string actualPrinter = (doc.GetPrinterName() ?? "").Trim();
+                    if (!string.Equals(actualPrinter, matchedPrinter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        results.Add(new LabelPrintJobResult
+                        {
+                            Slot = job.Slot,
+                            LabelName = labelName,
+                            PrinterName = matchedPrinter,
+                            Success = false,
+                            Error = $"Could not select printer '{matchedPrinter}' in b-PAC (resolved to '{actualPrinter}')."
+                        });
+                        continue;
+                    }
+
+                    PopulateDocument(doc, job.Slot, profile, details, job.FreeText ?? "");
+
+                    string docTitle = string.IsNullOrWhiteSpace(details.Name)
+                        ? $"openBIS_{job.Slot}"
+                        : $"{details.Name}_{job.Slot}";
+
+                    if (!doc.StartPrint(docTitle, bpac.PrintOptionConstants.bpoDefault))
+                    {
+                        results.Add(new LabelPrintJobResult
+                        {
+                            Slot = job.Slot,
+                            LabelName = labelName,
+                            PrinterName = matchedPrinter,
+                            Success = false,
+                            Error = $"b-PAC StartPrint failed for '{matchedPrinter}'."
+                        });
+                        continue;
+                    }
+                    startPrintSucceeded = true;
+
+                    if (!doc.PrintOut(1, bpac.PrintOptionConstants.bpoDefault))
+                    {
+                        results.Add(new LabelPrintJobResult
+                        {
+                            Slot = job.Slot,
+                            LabelName = labelName,
+                            PrinterName = matchedPrinter,
+                            Success = false,
+                            Error = $"b-PAC PrintOut failed for '{matchedPrinter}'."
+                        });
+                        continue;
+                    }
+
+                    doc.EndPrint();
+                    startPrintSucceeded = false;
+
+                    results.Add(new LabelPrintJobResult
+                    {
+                        Slot = job.Slot,
+                        LabelName = labelName,
+                        PrinterName = matchedPrinter,
+                        Success = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new LabelPrintJobResult
+                    {
+                        Slot = job.Slot,
+                        LabelName = labelName,
+                        PrinterName = matchedPrinter,
+                        Success = false,
+                        Error = ex.Message
+                    });
+                }
+                finally
+                {
+                    if (doc != null)
+                    {
+                        if (startPrintSucceeded)
+                        {
+                            try
+                            {
+                                doc.EndPrint();
+                            }
+                            catch
+                            {
+                                // Ignore b-PAC EndPrint cleanup errors.
+                            }
+                        }
+
+                        if (openSucceeded)
+                        {
+                            try
+                            {
+                                doc.Close();
+                            }
+                            catch
+                            {
+                                // Ignore b-PAC Close cleanup errors.
+                            }
+                        }
+                    }
+                }
+            }
+
+            bool allSucceeded = results.Count > 0 && results.All(r => r.Success);
+            string summaryError = allSucceeded
+                ? ""
+                : string.Join(Environment.NewLine, results.Where(r => !r.Success).Select(r => $"{r.LabelName}: {r.Error}"));
+
+            return new LabelPrintBatchResult
+            {
+                AllSucceeded = allSucceeded,
+                Error = summaryError,
+                Jobs = results
+            };
+        }
+
+        private Image RenderTemplatePreviewCore(
+            LabelTemplateType slot,
+            LabelTemplateProfile profile,
+            SampleDetailsDto details,
+            string freeText,
+            bpac.Document? reusableDoc)
+        {
             ArgumentNullException.ThrowIfNull(details);
 
             string templatePath = _configService.GetTemplateFilePath(slot, profile);
@@ -444,7 +912,7 @@ namespace OpenBISLabelStudio.Services
 
             string? tempPreviewFile = null;
             string? tempOverrideLbx = null;
-            bpac.Document? doc = null;
+            bpac.Document? doc = reusableDoc;
 
             try
             {
@@ -466,7 +934,7 @@ namespace OpenBISLabelStudio.Services
                     }
                 }
 
-                doc = new bpac.Document();
+                doc ??= new bpac.Document();
                 if (!doc.Open(effectiveTemplatePath))
                 {
                     return CreateFallbackPreviewBitmap(
@@ -631,6 +1099,15 @@ namespace OpenBISLabelStudio.Services
             if (!string.IsNullOrWhiteSpace(brotherPrinter))
             {
                 return brotherPrinter.Trim();
+            }
+
+            // OneNote (Desktop) initializes ~15x faster than Microsoft Print to PDF in b-PAC
+            // and renders cleanly on a nul: local port without network spooler stalls.
+            string? oneNotePrinter = installedPrinters.FirstOrDefault(
+                p => !string.IsNullOrWhiteSpace(p) && p.Contains("OneNote", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(oneNotePrinter))
+            {
+                return oneNotePrinter.Trim();
             }
 
             string? pdfPrinter = installedPrinters.FirstOrDefault(

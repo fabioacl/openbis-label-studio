@@ -8,20 +8,20 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
 
 - **Guided First-Run Setup Wizard (`SetupSettingsForm`)**:
   - Automatically runs on first launch (or whenever required configuration files under `config/` are missing/invalid):
-    1. **Connection**: Enter your openBIS instance URL and Personal Access Token (`Show token` toggle + live **Test Connection** check via `openbis_fetch.py --types`).
-    2. **Object Types & Template Profiles**: Filterable object type picker showing saved types immediately while syncing from openBIS asynchronously in the background. Each enabled type maps to **Molecule / Substance** (`Molecule`) or **Generic / Free-text** (`Generic`), while live example label previews render from `templates/*.lbx` in an isolated `--preview-worker` process without blocking type selection.
+    1. **Connection**: Enter your openBIS instance URL and Personal Access Token (`Show token` toggle + fast session check via `openbis_fetch.py --check` / `isSessionActive`).
+    2. **Object Types & Template Profiles**: Filterable object type picker showing saved types immediately while syncing from openBIS asynchronously in the background with a loading bar. Each enabled type maps to **Molecule / Substance** (`Molecule`) or **Generic / Free-text** (`Generic`), while live example label previews render from `templates/*.lbx` in a pre-warmed `--preview-worker` process without blocking type selection.
     3. **Printer Routing**: Map Windows printer queues to the **Small Box (12mm)**, **Magnet (12mm)**, and **Flask (24mm)** label slots (with graceful fallback if no printers are detected).
   - Canceling initial setup while required configs are incomplete exits cleanly instead of opening an unconfigured main window.
 
 - **openBIS Integration via `pybis` (`openbis_fetch.py` + `OpenBisClient`)**:
-  - Queries available openBIS object types, samples sorted by latest modification date, and sample details (`studied_by` full name/username, storage location, supplier name, `Spreadsheet` evaporation temperature with units, special storage conditions, and parent `ELN_PREVIEW` images).
-  - Switching object types in the main window cancels stale requests and keeps the object-type selector and **Settings...** button responsive while samples load.
+  - Queries available openBIS object types, samples sorted by latest modification date, and sample details (`studied_by` full name/username, storage location, supplier name, `Spreadsheet` evaporation temperature with units, special storage conditions, and cached `ELN_PREVIEW` images).
+  - Switching object types in the main window displays a loading bar, cancels stale requests, and keeps the object-type selector and **Settings...** button responsive while samples load.
   - Writes Python query outputs to isolated temporary files (`--out`) and classifies errors into `token_expired`, `connection_error`, and `unknown_error`.
   - **Expired-Token Recovery**: When startup or runtime queries fail with `token_expired`, an inline recovery prompt pre-fills the openBIS URL, clears/focuses the token input, validates and saves the new token, and automatically retries the failed query.
   - **Offline Resilience**: If openBIS is unreachable on startup (`connection_error`), cached `displayName` entries from `config/openbis_types.json` remain usable alongside a non-fatal status banner.
 
 - **Profile-Based Brother Label Templates (`OpenBISLabelStudio/templates/`)**:
-  - Previews run in an out-of-process `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes), crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions, and fall back to an installed local printer (such as `Microsoft Print to PDF`) if no Brother PT-P700 driver is installed.
+  - Previews and print jobs run in an out-of-process, pre-warmed `OpenBISLabelStudio.exe --preview-worker` host (preventing b-PAC COM main-STA UI freezes). Previews crop exported bitmaps using `.lbx` XML `<style:paper>` dimensions and fall back to an installed fast local printer (`OneNote` before `Microsoft Print to PDF`) if no Brother PT-P700 driver is installed.
   - **Molecule profile (`Molecule`)**:
     - `template_molecule_box_12mm.lbx` — Sample name, PermID QR code, researcher username.
     - `template_molecule_magnet_12mm.lbx` — Sample name, PermID QR code, researcher full name, evaporation temperature, and special storage hazard/condition icons.
@@ -29,10 +29,10 @@ A Windows desktop application built with .NET 10 WinForms and Python `pybis` for
   - **Generic profile (`Generic`)**:
     - `template_small_box_12mm.lbx`, `template_magnet_12mm.lbx`, `template_flask_24mm.lbx` — Sample name, PermID QR code, and interactive custom **Free Text** notes on the 12mm Magnet and 24mm Flask labels with live preview re-rendering.
 
-- **Ongoing Settings & Printer Auto-Save**:
+- **Ongoing Settings, Printer Auto-Save & Printing**:
   - Click **Settings...** on the main window at any time to edit Connection, Object Types & Templates, or Printer Routing (supports offline saving; **Cancel** discards unapplied changes).
   - Changing any of the three printer dropdowns on the main window immediately updates and saves `config/printers_config.json`.
-  - Clicking **Print Labels** displays the configured printer queue and resolved `.lbx` template filenames in a **Printer Routing & Queue** confirmation dialog (direct physical printing remains paused).
+  - Clicking **Print Labels** populates the checked `.lbx` templates and sends them through b-PAC to the selected installed Windows printer queues off the UI thread.
 
 ---
 

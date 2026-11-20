@@ -67,11 +67,13 @@ namespace OpenBISLabelStudio
             txtToken = new TextBox();
             chkShowToken = new CheckBox();
             btnTestConnection = new Button();
+            prgConnectionLoading = new ProgressBar();
             lblConnectionStatus = new Label();
             pnlObjectTypes = new Panel();
             lblTypeSearch = new Label();
             txtTypeFilter = new TextBox();
             btnRefreshTypes = new Button();
+            prgTypesLoading = new ProgressBar();
             lblTypesStatus = new Label();
             dgvObjectTypes = new DataGridView();
             colUse = new DataGridViewCheckBoxColumn();
@@ -149,6 +151,7 @@ namespace OpenBISLabelStudio
             lblWizardTitle.Size = new Size(280, 21);
             lblWizardTitle.TabIndex = 0;
             lblWizardTitle.Text = "Step 1 of 3 — Connect to openBIS";
+            lblWizardTitle.UseMnemonic = false;
 
             // 
             // lblWizardSubtitle
@@ -161,6 +164,7 @@ namespace OpenBISLabelStudio
             lblWizardSubtitle.Size = new Size(340, 15);
             lblWizardSubtitle.TabIndex = 1;
             lblWizardSubtitle.Text = "Enter your openBIS server URL and personal access token.";
+            lblWizardSubtitle.UseMnemonic = false;
 
             // 
             // pnlSettingsTabs
@@ -185,6 +189,7 @@ namespace OpenBISLabelStudio
             btnTabConnection.Size = new Size(280, 36);
             btnTabConnection.TabIndex = 0;
             btnTabConnection.Text = "1. Connection";
+            btnTabConnection.UseMnemonic = false;
             btnTabConnection.UseVisualStyleBackColor = false;
             btnTabConnection.Click += btnTabConnection_Click;
 
@@ -197,6 +202,7 @@ namespace OpenBISLabelStudio
             btnTabObjectTypes.Size = new Size(300, 36);
             btnTabObjectTypes.TabIndex = 1;
             btnTabObjectTypes.Text = "2. Object Types & Templates";
+            btnTabObjectTypes.UseMnemonic = false;
             btnTabObjectTypes.UseVisualStyleBackColor = false;
             btnTabObjectTypes.Click += btnTabObjectTypes_Click;
 
@@ -209,6 +215,7 @@ namespace OpenBISLabelStudio
             btnTabPrinters.Size = new Size(280, 36);
             btnTabPrinters.TabIndex = 2;
             btnTabPrinters.Text = "3. Printer Routing";
+            btnTabPrinters.UseMnemonic = false;
             btnTabPrinters.UseVisualStyleBackColor = false;
             btnTabPrinters.Click += btnTabPrinters_Click;
 
@@ -319,6 +326,7 @@ namespace OpenBISLabelStudio
             pnlConnection.Controls.Add(txtToken);
             pnlConnection.Controls.Add(chkShowToken);
             pnlConnection.Controls.Add(btnTestConnection);
+            pnlConnection.Controls.Add(prgConnectionLoading);
             pnlConnection.Controls.Add(lblConnectionStatus);
             pnlConnection.Dock = DockStyle.Fill;
             pnlConnection.Location = new Point(0, 0);
@@ -415,6 +423,17 @@ namespace OpenBISLabelStudio
             btnTestConnection.Click += btnTestConnection_Click;
 
             // 
+            // prgConnectionLoading
+            // 
+            prgConnectionLoading.Location = new Point(215, 286);
+            prgConnectionLoading.MarqueeAnimationSpeed = 25;
+            prgConnectionLoading.Name = "prgConnectionLoading";
+            prgConnectionLoading.Size = new Size(180, 16);
+            prgConnectionLoading.Style = ProgressBarStyle.Marquee;
+            prgConnectionLoading.TabIndex = 9;
+            prgConnectionLoading.Visible = false;
+
+            // 
             // lblConnectionStatus
             // 
             lblConnectionStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -429,6 +448,7 @@ namespace OpenBISLabelStudio
             pnlObjectTypes.Controls.Add(lblTypeSearch);
             pnlObjectTypes.Controls.Add(txtTypeFilter);
             pnlObjectTypes.Controls.Add(btnRefreshTypes);
+            pnlObjectTypes.Controls.Add(prgTypesLoading);
             pnlObjectTypes.Controls.Add(lblTypesStatus);
             pnlObjectTypes.Controls.Add(dgvObjectTypes);
             pnlObjectTypes.Controls.Add(grpExamplePreviews);
@@ -469,6 +489,17 @@ namespace OpenBISLabelStudio
             btnRefreshTypes.Text = "Refresh Types";
             btnRefreshTypes.UseVisualStyleBackColor = true;
             btnRefreshTypes.Click += btnRefreshTypes_Click;
+
+            // 
+            // prgTypesLoading
+            // 
+            prgTypesLoading.Location = new Point(568, 19);
+            prgTypesLoading.MarqueeAnimationSpeed = 25;
+            prgTypesLoading.Name = "prgTypesLoading";
+            prgTypesLoading.Size = new Size(180, 16);
+            prgTypesLoading.Style = ProgressBarStyle.Marquee;
+            prgTypesLoading.TabIndex = 6;
+            prgTypesLoading.Visible = false;
 
             // 
             // lblTypesStatus
@@ -831,11 +862,13 @@ namespace OpenBISLabelStudio
         private TextBox txtToken = null!;
         private CheckBox chkShowToken = null!;
         private Button btnTestConnection = null!;
+        private ProgressBar prgConnectionLoading = null!;
         private Label lblConnectionStatus = null!;
         private Panel pnlObjectTypes = null!;
         private Label lblTypeSearch = null!;
         private TextBox txtTypeFilter = null!;
         private Button btnRefreshTypes = null!;
+        private ProgressBar prgTypesLoading = null!;
         private Label lblTypesStatus = null!;
         private DataGridView dgvObjectTypes = null!;
         private DataGridViewCheckBoxColumn colUse = null!;

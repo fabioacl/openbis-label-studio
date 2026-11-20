@@ -303,6 +303,7 @@ namespace OpenBISLabelStudio
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
+            _previewRenderer.WarmUpWorkerInBackground();
 
             if (_currentStep == Models.SetupWizardStep.ObjectTypes && !_hasStartedPage2Previews)
             {
@@ -1060,8 +1061,7 @@ namespace OpenBISLabelStudio
         {
             string url = (txtInstanceUrl.Text ?? "").Trim();
             string token = (txtToken.Text ?? "").Trim();
-            return CachedServerTypes != null
-                   && string.Equals(_validatedUrl, url, StringComparison.Ordinal)
+            return string.Equals(_validatedUrl, url, StringComparison.Ordinal)
                    && string.Equals(_validatedToken, token, StringComparison.Ordinal);
         }
 
@@ -1080,35 +1080,35 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private async Task<Models.OpenBisTypesResult?> RunLiveConnectionCheckAsync(bool saveCredentialsOnSuccess)
+        private async Task<bool> RunLiveConnectionCheckAsync(bool saveCredentialsOnSuccess)
         {
             if (_isBusy)
             {
-                return null;
+                return false;
             }
 
             if (!ValidateConnectionInputs(out string url, out string token, out string inputError))
             {
                 SetConnectionStatus(inputError, StatusSeverity.Error);
-                return null;
+                return false;
             }
 
             SetBusy(true);
-            SetConnectionStatus("Connecting to openBIS and validating token...", StatusSeverity.Info);
+            SetConnectionStatus("Checking openBIS session...", StatusSeverity.Info);
 
             try
             {
-                Models.OpenBisTypesResult result = await _openBisClient.QueryTypesAsync(url, token);
+                Models.OpenBisConnectionResult result = await _openBisClient.CheckConnectionAsync(url, token);
                 if (IsDisposed || Disposing)
                 {
-                    return result;
+                    return result.Success;
                 }
 
                 if (!result.Success)
                 {
                     _validatedUrl = "";
                     _validatedToken = "";
-                    string message = FormatOpenBisFailureMessage(result);
+                    string message = FormatOpenBisFailureMessage(result.ErrorType, result.Error, "Failed to verify openBIS session.");
                     SetConnectionStatus(message, StatusSeverity.Error);
                     if (string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1116,14 +1116,11 @@ namespace OpenBISLabelStudio
                         txtToken.SelectAll();
                     }
 
-                    return result;
+                    return false;
                 }
 
                 _validatedUrl = url;
                 _validatedToken = token;
-                _autoFetchAttemptedForCurrentInputs = true;
-
-                ApplyServerTypes(result.Types);
 
                 if (saveCredentialsOnSuccess && !TryPersistConfig(
                         () => _configService.SaveAppConfig(new Models.AppConfig
@@ -1134,14 +1131,14 @@ namespace OpenBISLabelStudio
                         out string saveError))
                 {
                     SetConnectionStatus(saveError, StatusSeverity.Error);
-                    return null;
+                    return false;
                 }
 
                 string suffix = saveCredentialsOnSuccess ? " Credentials saved." : "";
                 SetConnectionStatus(
-                    $"Connected successfully ({result.Types.Count} object type(s) found).{suffix}",
+                    $"Connected successfully (session active).{suffix}",
                     StatusSeverity.Success);
-                return result;
+                return true;
             }
             catch (Exception ex)
             {
@@ -1150,7 +1147,7 @@ namespace OpenBISLabelStudio
                     SetConnectionStatus($"Unexpected error while checking openBIS connection: {ex.Message}", StatusSeverity.Error);
                 }
 
-                return null;
+                return false;
             }
             finally
             {
@@ -1250,29 +1247,35 @@ namespace OpenBISLabelStudio
 
         private static string FormatOpenBisFailureMessage(Models.OpenBisTypesResult result)
         {
-            if (string.Equals(result.ErrorType, "token_expired", StringComparison.OrdinalIgnoreCase))
+            return FormatOpenBisFailureMessage(result.ErrorType, result.Error, "Failed to query openBIS object types.");
+        }
+
+        private static string FormatOpenBisFailureMessage(string? errorType, string? error, string fallback)
+        {
+            if (string.Equals(errorType, "token_expired", StringComparison.OrdinalIgnoreCase))
             {
-                return string.IsNullOrWhiteSpace(result.Error)
+                return string.IsNullOrWhiteSpace(error)
                     ? "Your openBIS personal access token has expired or is invalid. Please enter a new token."
-                    : $"Token expired or invalid: {result.Error}";
+                    : $"Token expired or invalid: {error}";
             }
 
-            if (string.Equals(result.ErrorType, "connection_error", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(errorType, "connection_error", StringComparison.OrdinalIgnoreCase))
             {
-                return string.IsNullOrWhiteSpace(result.Error)
+                return string.IsNullOrWhiteSpace(error)
                     ? "Could not connect to the openBIS server."
-                    : $"Connection error: {result.Error}";
+                    : $"Connection error: {error}";
             }
 
-            return string.IsNullOrWhiteSpace(result.Error)
-                ? "Failed to query openBIS object types."
-                : result.Error;
+            return string.IsNullOrWhiteSpace(error)
+                ? fallback
+                : error;
         }
 
         private void SetTypesLoadingState(bool loading)
         {
             _isLoadingTypes = loading;
             btnRefreshTypes.Enabled = !loading && !_isBusy;
+            prgTypesLoading.Visible = loading;
         }
 
         private void SetBusy(bool busy)
@@ -1282,6 +1285,7 @@ namespace OpenBISLabelStudio
             txtInstanceUrl.ReadOnly = busy;
             txtToken.ReadOnly = busy;
             btnTestConnection.Enabled = !busy;
+            prgConnectionLoading.Visible = busy && _currentStep == Models.SetupWizardStep.Connection;
             btnNextFinish.Enabled = !busy;
             btnRefreshTypes.Enabled = !busy && !_isLoadingTypes;
             btnTabConnection.Enabled = !busy;
@@ -1341,6 +1345,7 @@ namespace OpenBISLabelStudio
 
             ClearFooterError();
             ++_typesFetchVersion;
+            SetTypesLoadingState(false);
             _validatedUrl = "";
             _validatedToken = "";
             _autoFetchAttemptedForCurrentInputs = false;
@@ -1437,8 +1442,8 @@ namespace OpenBISLabelStudio
                 return;
             }
 
-            Models.OpenBisTypesResult? result = await RunLiveConnectionCheckAsync(saveCredentialsOnSuccess: true);
-            if (IsDisposed || Disposing || result == null || !result.Success)
+            bool connected = await RunLiveConnectionCheckAsync(saveCredentialsOnSuccess: true);
+            if (IsDisposed || Disposing || !connected)
             {
                 return;
             }
@@ -1455,8 +1460,8 @@ namespace OpenBISLabelStudio
                 {
                     if (!IsValidatedForCurrentInputs())
                     {
-                        Models.OpenBisTypesResult? result = await RunLiveConnectionCheckAsync(saveCredentialsOnSuccess: true);
-                        if (IsDisposed || Disposing || result == null || !result.Success)
+                        bool connected = await RunLiveConnectionCheckAsync(saveCredentialsOnSuccess: true);
+                        if (IsDisposed || Disposing || !connected)
                         {
                             return;
                         }
