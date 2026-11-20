@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Windows.Forms;
 
 namespace OpenBISLabelStudio.Tests
@@ -41,7 +42,8 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks), Form1ResolveTemplateProfileUsesConfiguredMappingAndFallbacks),
                 (nameof(Form1HasSettingsButtonWithoutOverlaps), Form1HasSettingsButtonWithoutOverlaps),
                 (nameof(Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges), Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges),
-                (nameof(TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion), TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion)
+                (nameof(TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion), TokenRecoveryCoordinatorCoalescesConcurrentCallsAndResetsAfterCompletion),
+                (nameof(BackendAssemblyHasNoUiControlDependencies), BackendAssemblyHasNoUiControlDependencies)
             };
 
             int failures = 0;
@@ -1446,6 +1448,36 @@ namespace OpenBISLabelStudio.Tests
                 {
                     SynchronizationContext.SetSynchronizationContext(previousContext);
                     ownedContext.Dispose();
+                }
+            }
+        }
+
+        private static void BackendAssemblyHasNoUiControlDependencies()
+        {
+            Assembly backendAssembly = typeof(AppConfigService).Assembly;
+            AssertEqual("OpenBISLabelStudio.Backend", backendAssembly.GetName().Name,
+                "AppConfigService must live in OpenBISLabelStudio.Backend assembly");
+
+            static bool IsDisallowedUiType(Type type) =>
+                typeof(Control).IsAssignableFrom(type)
+                || typeof(Form).IsAssignableFrom(type)
+                || string.Equals(type.FullName, "System.Windows.Forms.MessageBox", StringComparison.Ordinal)
+                || string.Equals(type.FullName, "System.Windows.Forms.Application", StringComparison.Ordinal);
+
+            foreach (Type t in backendAssembly.GetTypes())
+            {
+                AssertFalse(IsDisallowedUiType(t), $"Backend type '{t.FullName}' must not reference WinForms UI types");
+                foreach (FieldInfo f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                {
+                    AssertFalse(IsDisallowedUiType(f.FieldType), $"Backend field '{t.FullName}.{f.Name}' must not reference UI types");
+                }
+                foreach (MethodInfo m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                {
+                    AssertFalse(IsDisallowedUiType(m.ReturnType), $"Backend method '{t.FullName}.{m.Name}' return type must not reference UI types");
+                    foreach (ParameterInfo p in m.GetParameters())
+                    {
+                        AssertFalse(IsDisallowedUiType(p.ParameterType), $"Backend method '{t.FullName}.{m.Name}' parameter '{p.Name}' must not reference UI types");
+                    }
                 }
             }
         }

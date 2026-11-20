@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/Solution Items/" />
+  <Project Path="OpenBISLabelStudio.Backend/OpenBISLabelStudio.Backend.csproj" />
   <Project Path="OpenBISLabelStudio/OpenBISLabelStudio.csproj" />
   <Project Path="OpenBISLabelStudio.Tests/OpenBISLabelStudio.Tests.csproj" />
 </Solution>

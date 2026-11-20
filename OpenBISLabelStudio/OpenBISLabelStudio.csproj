@@ -10,31 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <COMReference Include="bpac">
-      <WrapperTool>tlbimp</WrapperTool>
-      <VersionMinor>3</VersionMinor>
-      <VersionMajor>1</VersionMajor>
-      <Guid>90359d74-b7d9-467f-b938-3883f4cab582</Guid>
-      <Lcid>0</Lcid>
-      <Isolated>false</Isolated>
-      <EmbedInteropTypes>true</EmbedInteropTypes>
-    </COMReference>
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Update="openbis_fetch.py">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="templates\**\*.lbx">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="config\**\*" Condition="Exists('config')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <ProjectReference Include="..\OpenBISLabelStudio.Backend\OpenBISLabelStudio.Backend.csproj" />
   </ItemGroup>
 
 </Project>

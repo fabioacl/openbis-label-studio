@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\OpenBISLabelStudio.Backend\OpenBISLabelStudio.Backend.csproj" />
     <ProjectReference Include="..\OpenBISLabelStudio\OpenBISLabelStudio.csproj" />
   </ItemGroup>
 
