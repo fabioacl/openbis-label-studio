@@ -68,7 +68,8 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
                 (nameof(BackendFiltersOutManagedInternallyTypesInBuildAndServerSync), BackendFiltersOutManagedInternallyTypesInBuildAndServerSync),
                 (nameof(AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms), AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms),
-                (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
+                (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences),
+                (nameof(BackendMoleculeTemperatureOverrideIsolationAndPrintFlow), BackendMoleculeTemperatureOverrideIsolationAndPrintFlow)
             };
 
             int failures = 0;
@@ -2341,6 +2342,10 @@ namespace OpenBISLabelStudio.Tests
                 = new List<(string, string, string, string)>();
             public List<(LabelTemplateType Slot, string FreeText)> RenderSlotWithFreeTextCalls { get; }
                 = new List<(LabelTemplateType, string)>();
+            public List<string> RenderMoleculeEvaporationTemperatureCalls { get; }
+                = new List<string>();
+            public List<IReadOnlyList<PrintSlotSelection>> PrintSelectedLabelsCalls { get; }
+                = new List<IReadOnlyList<PrintSlotSelection>>();
             public List<LabelTemplateProfile> GetExamplePreviewsCalls { get; } = new List<LabelTemplateProfile>();
             public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string Reason)> GetFallbackPreviewCalls { get; }
                 = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
@@ -2620,6 +2625,23 @@ namespace OpenBISLabelStudio.Tests
                 return Task.FromResult(GetSlotPayload(slot));
             }
 
+            public Task<IReadOnlyDictionary<LabelTemplateType, byte[]>> RenderMoleculeEvaporationTemperatureAsync(
+                string evaporationTemperature,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    RenderMoleculeEvaporationTemperatureCalls.Add(evaporationTemperature);
+                }
+
+                IReadOnlyDictionary<LabelTemplateType, byte[]> slots = new Dictionary<LabelTemplateType, byte[]>
+                {
+                    [LabelTemplateType.SmallBox12mm] = GetSlotPayload(LabelTemplateType.SmallBox12mm),
+                    [LabelTemplateType.Magnet12mm] = GetSlotPayload(LabelTemplateType.Magnet12mm)
+                };
+                return Task.FromResult(slots);
+            }
+
             public Task<OperationResult> UpdatePrinterSelectionsAsync(
                 string smallBoxPrinter,
                 string magnetPrinter,
@@ -2629,7 +2651,14 @@ namespace OpenBISLabelStudio.Tests
             public Task<LabelPrintBatchResult> PrintSelectedLabelsAsync(
                 IReadOnlyList<PrintSlotSelection> selections,
                 CancellationToken ct = default)
-                => Task.FromResult(new LabelPrintBatchResult { AllSucceeded = true });
+            {
+                lock (_callsLock)
+                {
+                    PrintSelectedLabelsCalls.Add(selections);
+                }
+
+                return Task.FromResult(new LabelPrintBatchResult { AllSucceeded = true });
+            }
 
             public byte[] GetLoadingPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile)
                 => _validPngBytes;
@@ -3388,6 +3417,8 @@ namespace OpenBISLabelStudio.Tests
 
             public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string FreeText)> RenderedCalls { get; }
                 = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
+            public List<(LabelTemplateType Slot, string EvaporationTemperature)> RenderedTemperatureCalls { get; }
+                = new List<(LabelTemplateType, string)>();
             public LabelTemplateProfile? LastPrintProfile { get; private set; }
             public SampleDetailsDto? LastPrintDetails { get; private set; }
             public IReadOnlyList<LabelPrintJobRequest>? LastPrintJobs { get; private set; }
@@ -3400,7 +3431,8 @@ namespace OpenBISLabelStudio.Tests
                 CancellationToken cancellationToken = default)
             {
                 RenderedCalls.Add((slot, profile, freeText));
-                return base.RenderTemplatePreviewPngAsync(slot, profile, details, freeText, cancellationToken);
+                RenderedTemperatureCalls.Add((slot, details?.EvaporationTemperature ?? ""));
+                return base.RenderTemplatePreviewPngAsync(slot, profile, details!, freeText, cancellationToken);
             }
 
             public override Task<LabelPrintBatchResult> PrintLabelsAsync(
@@ -4285,6 +4317,156 @@ namespace OpenBISLabelStudio.Tests
                 AssertNotNull(exeIcon, $"Expected embedded Win32 application icon on '{exePath}'");
                 AssertTrue(exeIcon!.Width > 0 && exeIcon.Height > 0, "Executable icon dimensions must be positive");
             }
+        }
+
+        private static void BackendMoleculeTemperatureOverrideIsolationAndPrintFlow()
+        {
+            static void AssertValidPngBytes(byte[] bytes, string context)
+            {
+                AssertTrue(bytes != null && bytes.Length > 8, $"{context}: PNG bytes must be non-empty");
+                AssertEqual((byte)0x89, bytes![0], $"{context}: PNG byte[0] mismatch");
+                AssertEqual((byte)0x50, bytes[1], $"{context}: PNG byte[1] mismatch");
+                AssertEqual((byte)0x4E, bytes[2], $"{context}: PNG byte[2] mismatch");
+                AssertEqual((byte)0x47, bytes[3], $"{context}: PNG byte[3] mismatch");
+            }
+
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "valid-tok"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ConfiguredOpenBisType { Code = "SUBSTRATE", DisplayName = "Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+                configService.SavePrinterConfig(AppConfigService.CreateDefaultPrinterConfig());
+
+                Directory.CreateDirectory(configService.TemplatesDirectoryPath);
+                foreach (LabelTemplateProfile profile in Enum.GetValues<LabelTemplateProfile>())
+                {
+                    foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+                    {
+                        File.WriteAllText(configService.GetTemplateFilePath(slot, profile), "placeholder");
+                    }
+                }
+
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        action = req.get('action', '')\n" +
+                    "        if action == 'list':\n" +
+                    "            resp = {'success': True, 'data': []}\n" +
+                    "        elif action == 'details':\n" +
+                    "            perm_id = req.get('permId', '')\n" +
+                    "            if perm_id == 'PERM-MOL-T1':\n" +
+                    "                resp = {'success': True, 'details': {'permId': perm_id, 'sampleType': 'SUBSTANCE', 'name': '696a', 'evaporationTemperature': '250°C (1 A', 'evaporationTemperatureRaw': '250°C (1 A/min)'}}\n" +
+                    "            else:\n" +
+                    "                resp = {'success': True, 'details': {'permId': perm_id, 'sampleType': 'SUBSTRATE', 'name': 'Wafer-1', 'evaporationTemperature': ''}}\n" +
+                    "        else:\n" +
+                    "            resp = {'success': True, 'sessionActive': True}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                var client = new OpenBisClient(tempRoot);
+                var capturingRenderer = new CapturingLabelPreviewRenderer(
+                    configService,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                using var backend = new LabelStudioBackend(
+                    configService,
+                    client,
+                    capturingRenderer,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                // 1. Before sample load: temperature re-render returns empty dictionary cleanly.
+                IReadOnlyDictionary<LabelTemplateType, byte[]> beforeLoad = backend
+                    .RenderMoleculeEvaporationTemperatureAsync("300°C")
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(0, beforeLoad.Count, "Expected empty dictionary before any sample is loaded");
+
+                // 2. Load Molecule sample and verify extracted + raw temperatures surfaced on bundle.
+                SamplePreviewBundleDto molBundle = backend.LoadSamplePreviewsAsync("SUBSTANCE", "PERM-MOL-T1", "", "").GetAwaiter().GetResult();
+                AssertTrue(molBundle.Success, $"Molecule load failed: {molBundle.ErrorMessage}");
+                AssertEqual("250°C (1 A", molBundle.EvaporationTemperature, "Bundle EvaporationTemperature mismatch");
+                AssertEqual("250°C (1 A/min)", molBundle.EvaporationTemperatureRaw, "Bundle EvaporationTemperatureRaw mismatch");
+
+                // 3. Re-render Molecule temperature renders ONLY SmallBox12mm and Magnet12mm with cloned snapshot.
+                capturingRenderer.RenderedTemperatureCalls.Clear();
+                IReadOnlyDictionary<LabelTemplateType, byte[]> rerendered = backend
+                    .RenderMoleculeEvaporationTemperatureAsync("250°C")
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(2, rerendered.Count, "Expected exactly 2 Molecule temperature slots rendered");
+                AssertTrue(rerendered.ContainsKey(LabelTemplateType.SmallBox12mm), "Expected SmallBox12mm preview");
+                AssertTrue(rerendered.ContainsKey(LabelTemplateType.Magnet12mm), "Expected Magnet12mm preview");
+                AssertFalse(rerendered.ContainsKey(LabelTemplateType.Flask24mm), "Flask24mm must not be re-rendered for temperature");
+                AssertValidPngBytes(rerendered[LabelTemplateType.SmallBox12mm], "SmallBox temperature preview");
+                AssertValidPngBytes(rerendered[LabelTemplateType.Magnet12mm], "Magnet temperature preview");
+                AssertEqual(2, capturingRenderer.RenderedTemperatureCalls.Count, "Expected 2 renderer temperature calls");
+                foreach (var call in capturingRenderer.RenderedTemperatureCalls)
+                {
+                    AssertEqual("250°C", call.EvaporationTemperature, $"Slot {call.Slot} rendered wrong temperature");
+                }
+
+                // 4. Preview re-render did not mutate baseline sample; printing without override keeps openBIS value,
+                //    and printing with an override applies it cleanly.
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection { Slot = LabelTemplateType.SmallBox12mm, PrinterName = "Missing" }
+                }).GetAwaiter().GetResult();
+                AssertEqual("250°C (1 A", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "Preview re-render must not mutate baseline active sample temperature");
+
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Missing",
+                        EvaporationTemperature = "310°C"
+                    }
+                }).GetAwaiter().GetResult();
+                AssertEqual("310°C", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "PrintSelectedLabelsAsync must apply Molecule EvaporationTemperature override");
+
+                // 5. ClearActiveSample resets temperature state; Generic profile ignores temperature overrides.
+                backend.ClearActiveSample();
+                AssertEqual(0, backend.RenderMoleculeEvaporationTemperatureAsync("400°C").GetAwaiter().GetResult().Count,
+                    "Expected empty dictionary after ClearActiveSample");
+
+                SamplePreviewBundleDto genBundle = backend.LoadSamplePreviewsAsync("SUBSTRATE", "PERM-GEN-T1", "", "").GetAwaiter().GetResult();
+                AssertTrue(genBundle.Success, "Generic load should succeed");
+                capturingRenderer.RenderedTemperatureCalls.Clear();
+                AssertEqual(0, backend.RenderMoleculeEvaporationTemperatureAsync("400°C").GetAwaiter().GetResult().Count,
+                    "Generic profile must ignore RenderMoleculeEvaporationTemperatureAsync");
+                AssertEqual(0, capturingRenderer.RenderedTemperatureCalls.Count, "Generic profile must trigger 0 temperature renders");
+
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Missing",
+                        FreeText = "Note",
+                        EvaporationTemperature = "400°C"
+                    }
+                }).GetAwaiter().GetResult();
+                AssertEqual("", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "Generic profile print must not inject Molecule EvaporationTemperature override");
+            });
         }
 
         private static void ShowOffscreen(Form form)

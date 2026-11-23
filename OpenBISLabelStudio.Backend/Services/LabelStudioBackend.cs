@@ -1012,6 +1012,8 @@ namespace OpenBISLabelStudio.Backend.Services
                 Profile = activeProfile,
                 SampleName = result.Details.Name ?? "",
                 PermId = string.IsNullOrEmpty(result.Details.PermId) ? normalizedPermId : result.Details.PermId,
+                EvaporationTemperature = result.Details.EvaporationTemperature ?? "",
+                EvaporationTemperatureRaw = result.Details.EvaporationTemperatureRaw ?? "",
                 SlotPreviews = slotPreviews
             };
         }
@@ -1059,6 +1061,72 @@ namespace OpenBISLabelStudio.Backend.Services
                     snapshot.Profile,
                     $"Preview unavailable: {ex.Message}");
             }
+        }
+
+        /// <inheritdoc />
+        public async Task<IReadOnlyDictionary<LabelTemplateType, byte[]>> RenderMoleculeEvaporationTemperatureAsync(
+            string evaporationTemperature,
+            CancellationToken ct = default)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            ActiveSampleState? snapshot;
+            lock (_activeSampleLock)
+            {
+                snapshot = Volatile.Read(ref _disposed) == 0 ? _activeSample : null;
+            }
+
+            if (snapshot == null || snapshot.Profile != LabelTemplateProfile.Molecule)
+            {
+                return new Dictionary<LabelTemplateType, byte[]>();
+            }
+
+            SampleDetailsDto overriddenDetails = CloneDetailsWithEvaporationTemperature(
+                snapshot.Details,
+                evaporationTemperature ?? "");
+
+            var slots = new[]
+            {
+                LabelTemplateType.SmallBox12mm,
+                LabelTemplateType.Magnet12mm
+            };
+
+            var rendered = new Dictionary<LabelTemplateType, byte[]>();
+            var renderedLock = new object();
+
+            Task[] tasks = slots.Select(async slot =>
+            {
+                byte[] pngBytes;
+                try
+                {
+                    pngBytes = await _previewRenderer.RenderTemplatePreviewPngAsync(
+                        slot,
+                        LabelTemplateProfile.Molecule,
+                        overriddenDetails,
+                        "",
+                        ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    pngBytes = LabelPreviewRenderer.CreateFallbackPreviewPng(
+                        slot,
+                        LabelTemplateProfile.Molecule,
+                        $"Preview unavailable: {ex.Message}");
+                }
+
+                lock (renderedLock)
+                {
+                    rendered[slot] = pngBytes;
+                }
+            }).ToArray();
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return rendered;
         }
 
         /// <inheritdoc />
@@ -1165,11 +1233,45 @@ namespace OpenBISLabelStudio.Backend.Services
                 };
             }
 
+            string? tempOverride = snapshot.Profile == LabelTemplateProfile.Molecule
+                ? selections.FirstOrDefault(s => s?.EvaporationTemperature != null)?.EvaporationTemperature
+                : null;
+            SampleDetailsDto detailsForPrint = tempOverride != null
+                ? CloneDetailsWithEvaporationTemperature(snapshot.Details, tempOverride)
+                : snapshot.Details;
+
             return await _previewRenderer.PrintLabelsAsync(
                 snapshot.Profile,
-                snapshot.Details,
+                detailsForPrint,
                 jobs,
                 ct).ConfigureAwait(false);
+        }
+
+        private static SampleDetailsDto CloneDetailsWithEvaporationTemperature(
+            SampleDetailsDto source,
+            string evaporationTemperature)
+        {
+            return new SampleDetailsDto
+            {
+                PermId = source.PermId,
+                SampleType = source.SampleType,
+                Name = source.Name,
+                StudiedBy = source.StudiedBy,
+                StudiedByName = source.StudiedByName,
+                StudiedByUsername = source.StudiedByUsername,
+                StorageLocation = source.StorageLocation,
+                SupplierOwnName = source.SupplierOwnName,
+                EvaporationTemperature = evaporationTemperature ?? "",
+                EvaporationTemperatureRaw = source.EvaporationTemperatureRaw,
+                SpecialStorageConditions = source.SpecialStorageConditions != null
+                    ? new List<string>(source.SpecialStorageConditions)
+                    : new List<string>(),
+                IconFlags = source.IconFlags ?? new IconFlagsDto(),
+                ElnPreviewPath = source.ElnPreviewPath,
+                Properties = source.Properties != null
+                    ? new Dictionary<string, string>(source.Properties)
+                    : new Dictionary<string, string>()
+            };
         }
 
         /// <inheritdoc />
