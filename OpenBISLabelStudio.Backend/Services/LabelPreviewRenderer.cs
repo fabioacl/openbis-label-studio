@@ -30,6 +30,7 @@ namespace OpenBISLabelStudio.Services
     public class LabelPreviewRenderer
     {
         public const int ExportResolutionDpi = 360;
+        public const int PreviewExportResolutionDpi = 720;
         private const string DefaultFreeTextPlaceholder = "Free text placeholder";
         private const string TransparentPngFileName = "openbis_transparent_1x1.png";
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -996,6 +997,7 @@ namespace OpenBISLabelStudio.Services
                 bpac.Document? doc = reusableDoc;
                 bool openSucceeded = false;
                 bool startPrintSucceeded = false;
+                string? tempPreparedElnPng = null;
 
                 try
                 {
@@ -1029,7 +1031,23 @@ namespace OpenBISLabelStudio.Services
                         continue;
                     }
 
-                    PopulateDocument(doc, job.Slot, profile, details, job.FreeText ?? "");
+                    if (profile == LabelTemplateProfile.Molecule
+                        && job.Slot == LabelTemplateType.Flask24mm
+                        && !string.IsNullOrEmpty(details.ElnPreviewPath)
+                        && File.Exists(details.ElnPreviewPath))
+                    {
+                        double elnWPt = 42.9;
+                        double elnHPt = 41.1;
+                        if (TryReadLbxElnPreviewBoundsPt(templatePath, out _, out _, out double parsedWPt, out double parsedHPt, out _))
+                        {
+                            elnWPt = parsedWPt;
+                            elnHPt = parsedHPt;
+                        }
+
+                        tempPreparedElnPng = ElnImageProcessor.TryCreatePreparedPrintPng(details.ElnPreviewPath, elnWPt, elnHPt);
+                    }
+
+                    PopulateDocument(doc, job.Slot, profile, details, job.FreeText ?? "", preparedElnImagePath: tempPreparedElnPng);
 
                     string docTitle = string.IsNullOrWhiteSpace(details.Name)
                         ? $"openBIS_{job.Slot}"
@@ -1112,6 +1130,8 @@ namespace OpenBISLabelStudio.Services
                             }
                         }
                     }
+
+                    TryDeleteTempFile(tempPreparedElnPng);
                 }
             }
 
@@ -1174,14 +1194,46 @@ namespace OpenBISLabelStudio.Services
             string? tempPreviewFile = null;
             string? tempOverrideLbx = null;
             bpac.Document? doc = reusableDoc;
+            Bitmap? elnOverlayBitmap = null;
 
             try
             {
                 bool hasPaperSize = TryReadLbxMetadata(
                     templatePath,
+                    PreviewExportResolutionDpi,
                     out int expectedWidthPx,
                     out int expectedHeightPx,
+                    out double horizontalPt,
+                    out double verticalPt,
                     out string? designedPrinter);
+
+                double elnXPt = 0;
+                double elnYPt = 0;
+                double elnWPt = 0;
+                double elnHPt = 0;
+                double elnAngleDeg = 0;
+                bool hasElnBounds = profile == LabelTemplateProfile.Molecule
+                                    && slot == LabelTemplateType.Flask24mm
+                                    && !string.IsNullOrEmpty(details.ElnPreviewPath)
+                                    && File.Exists(details.ElnPreviewPath)
+                                    && TryReadLbxElnPreviewBoundsPt(
+                                        templatePath,
+                                        out elnXPt,
+                                        out elnYPt,
+                                        out elnWPt,
+                                        out elnHPt,
+                                        out elnAngleDeg)
+                                    && Math.Abs(elnAngleDeg) < 0.01;
+
+                if (hasElnBounds)
+                {
+                    int overlayBoxW = Math.Max(1, (int)Math.Round(elnWPt * PreviewExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
+                    int overlayBoxH = Math.Max(1, (int)Math.Round(elnHPt * PreviewExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
+                    elnOverlayBitmap = ElnImageProcessor.BuildPreparedElnPreviewBitmap(
+                        details.ElnPreviewPath,
+                        overlayBoxW,
+                        overlayBoxH);
+                }
 
                 string effectiveTemplatePath = templatePath;
                 IReadOnlyList<string> installedPrinters = _installedPrintersProvider?.Invoke() ?? GetSystemInstalledPrinters();
@@ -1206,13 +1258,20 @@ namespace OpenBISLabelStudio.Services
                         false);
                 }
 
-                PopulateDocument(doc, slot, profile, details, freeText);
+                PopulateDocument(
+                    doc,
+                    slot,
+                    profile,
+                    details,
+                    freeText,
+                    preparedElnImagePath: null,
+                    suppressElnPreviewForOverlay: elnOverlayBitmap != null);
 
                 tempPreviewFile = Path.Combine(
                     Path.GetTempPath(),
                     $"openbis_preview_{slot}_{Guid.NewGuid():N}.png");
 
-                if (!doc.Export((bpac.ExportType)4, tempPreviewFile, ExportResolutionDpi) || !File.Exists(tempPreviewFile))
+                if (!doc.Export((bpac.ExportType)4, tempPreviewFile, PreviewExportResolutionDpi) || !File.Exists(tempPreviewFile))
                 {
                     return new RenderedTemplateOutcome(
                         CreateFallbackPreviewBitmap(
@@ -1226,9 +1285,46 @@ namespace OpenBISLabelStudio.Services
                 using Image original = Image.FromStream(fs);
                 using var exportedBitmap = new Bitmap(original);
 
+                bool isOversizedFallback = hasPaperSize
+                                           && (exportedBitmap.Width > expectedWidthPx * 1.35
+                                               || exportedBitmap.Height > expectedHeightPx * 1.35);
+
                 Bitmap resultBitmap = hasPaperSize
                     ? CropFallbackExportBitmap(exportedBitmap, expectedWidthPx, expectedHeightPx)
                     : new Bitmap(exportedBitmap);
+
+                if (elnOverlayBitmap != null && hasElnBounds)
+                {
+                    double pxPerPtX = hasPaperSize && horizontalPt > 0
+                        ? ((isOversizedFallback ? expectedWidthPx : resultBitmap.Width) / horizontalPt)
+                        : PreviewExportResolutionDpi / 72.0;
+                    double pxPerPtY = hasPaperSize && verticalPt > 0
+                        ? ((isOversizedFallback ? expectedHeightPx : resultBitmap.Height) / verticalPt)
+                        : PreviewExportResolutionDpi / 72.0;
+
+                    int boxX = (int)Math.Round(elnXPt * pxPerPtX);
+                    int boxY = (int)Math.Round(elnYPt * pxPerPtY);
+                    int boxW = Math.Max(1, (int)Math.Round(elnWPt * pxPerPtX));
+                    int boxH = Math.Max(1, (int)Math.Round(elnHPt * pxPerPtY));
+
+                    double fitScale = Math.Min((double)boxW / elnOverlayBitmap.Width, (double)boxH / elnOverlayBitmap.Height);
+                    int drawW = Math.Max(1, (int)Math.Round(elnOverlayBitmap.Width * fitScale));
+                    int drawH = Math.Max(1, (int)Math.Round(elnOverlayBitmap.Height * fitScale));
+                    int drawX = boxX + (boxW - drawW) / 2;
+                    int drawY = boxY + (boxH - drawH) / 2;
+
+                    using Graphics g = Graphics.FromImage(resultBitmap);
+                    ElnImageProcessor.ConfigureHighQualityGraphics(g);
+                    g.DrawImage(
+                        elnOverlayBitmap,
+                        new Rectangle(drawX, drawY, drawW, drawH),
+                        0,
+                        0,
+                        elnOverlayBitmap.Width,
+                        elnOverlayBitmap.Height,
+                        GraphicsUnit.Pixel);
+                }
+
                 return new RenderedTemplateOutcome(resultBitmap, true);
             }
             catch (Exception ex)
@@ -1242,6 +1338,7 @@ namespace OpenBISLabelStudio.Services
             }
             finally
             {
+                elnOverlayBitmap?.Dispose();
                 if (doc != null)
                 {
                     try
@@ -1452,7 +1549,7 @@ namespace OpenBISLabelStudio.Services
                 bool hasBrother = installedPrinters.Any(p => !string.IsNullOrWhiteSpace(p) && p.Contains("Brother", StringComparison.OrdinalIgnoreCase));
                 string printerMode = hasBrother ? "brother" : "pdf";
                 string cacheDir = Path.Combine(Path.GetTempPath(), "openbis_example_preview_cache");
-                string fileName = $"{profile}_{slot}_{info.Length}_{info.LastWriteTimeUtc.Ticks}_{ExportResolutionDpi}_{printerMode}_v2.png";
+                string fileName = $"{profile}_{slot}_{info.Length}_{info.LastWriteTimeUtc.Ticks}_{PreviewExportResolutionDpi}_{printerMode}_v3.png";
                 return Path.Combine(cacheDir, fileName);
             }
             catch
@@ -1692,11 +1789,25 @@ namespace OpenBISLabelStudio.Services
 
         private static bool TryReadLbxMetadata(string lbxPath, out int widthPx, out int heightPx, out string? printerName)
         {
+            return TryReadLbxMetadata(lbxPath, ExportResolutionDpi, out widthPx, out heightPx, out _, out _, out printerName);
+        }
+
+        private static bool TryReadLbxMetadata(
+            string lbxPath,
+            int dpi,
+            out int widthPx,
+            out int heightPx,
+            out double horizontalPt,
+            out double verticalPt,
+            out string? printerName)
+        {
             widthPx = 0;
             heightPx = 0;
+            horizontalPt = 0;
+            verticalPt = 0;
             printerName = null;
 
-            if (string.IsNullOrWhiteSpace(lbxPath) || !File.Exists(lbxPath))
+            if (string.IsNullOrWhiteSpace(lbxPath) || !File.Exists(lbxPath) || dpi <= 0)
             {
                 return false;
             }
@@ -1729,12 +1840,81 @@ namespace OpenBISLabelStudio.Services
                 string orientation = paper.Attribute("orientation")?.Value ?? "";
                 bool isLandscape = string.Equals(orientation, "landscape", StringComparison.OrdinalIgnoreCase);
 
-                double horizontalPt = isLandscape ? rawH : rawW;
-                double verticalPt = isLandscape ? rawW : rawH;
+                horizontalPt = isLandscape ? rawH : rawW;
+                verticalPt = isLandscape ? rawW : rawH;
 
-                widthPx = Math.Max(1, (int)Math.Round(horizontalPt * ExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
-                heightPx = Math.Max(1, (int)Math.Round(verticalPt * ExportResolutionDpi / 72.0, MidpointRounding.AwayFromZero));
+                widthPx = Math.Max(1, (int)Math.Round(horizontalPt * dpi / 72.0, MidpointRounding.AwayFromZero));
+                heightPx = Math.Max(1, (int)Math.Round(verticalPt * dpi / 72.0, MidpointRounding.AwayFromZero));
                 return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Reads the <c>elnPreview</c> image object bounds (in points relative to the top-left label origin)
+        /// from an <c>.lbx</c> template archive.
+        /// </summary>
+        public static bool TryReadLbxElnPreviewBoundsPt(
+            string lbxPath,
+            out double xPt,
+            out double yPt,
+            out double widthPt,
+            out double heightPt,
+            out double angleDeg)
+        {
+            xPt = 0;
+            yPt = 0;
+            widthPt = 0;
+            heightPt = 0;
+            angleDeg = 0;
+
+            if (string.IsNullOrWhiteSpace(lbxPath) || !File.Exists(lbxPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                using ZipArchive archive = ZipFile.OpenRead(lbxPath);
+                ZipArchiveEntry? entry = archive.GetEntry("label.xml");
+                if (entry == null)
+                {
+                    return false;
+                }
+
+                using Stream stream = entry.Open();
+                XDocument doc = XDocument.Load(stream);
+                foreach (XElement styleEl in doc.Descendants().Where(e => e.Name.LocalName == "objectStyle"))
+                {
+                    XElement? expandedEl = styleEl.Elements().FirstOrDefault(e => e.Name.LocalName == "expanded");
+                    string? objName = expandedEl?.Attribute("objectName")?.Value;
+                    if (!string.Equals(objName, "elnPreview", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (!TryParseLengthToPoints(styleEl.Attribute("x")?.Value, out xPt)
+                        || !TryParseLengthToPoints(styleEl.Attribute("y")?.Value, out yPt)
+                        || !TryParseLengthToPoints(styleEl.Attribute("width")?.Value, out widthPt)
+                        || !TryParseLengthToPoints(styleEl.Attribute("height")?.Value, out heightPt))
+                    {
+                        return false;
+                    }
+
+                    string? rawAngle = styleEl.Attribute("angle")?.Value;
+                    if (!string.IsNullOrWhiteSpace(rawAngle)
+                        && !double.TryParse(rawAngle, NumberStyles.Float, CultureInfo.InvariantCulture, out angleDeg))
+                    {
+                        angleDeg = 0;
+                    }
+
+                    return widthPt > 0 && heightPt > 0;
+                }
+
+                return false;
             }
             catch
             {
@@ -1877,7 +2057,9 @@ namespace OpenBISLabelStudio.Services
             LabelTemplateType slot,
             LabelTemplateProfile profile,
             SampleDetailsDto details,
-            string freeText)
+            string freeText,
+            string? preparedElnImagePath = null,
+            bool suppressElnPreviewForOverlay = false)
         {
             string transparentPngPath = EnsureTransparentPngPath();
 
@@ -1968,13 +2150,26 @@ namespace OpenBISLabelStudio.Services
                     bpac.Object? elnObj = doc.GetObject("elnPreview");
                     if (elnObj != null)
                     {
-                        if (!string.IsNullOrEmpty(details.ElnPreviewPath) && File.Exists(details.ElnPreviewPath))
+                        if (suppressElnPreviewForOverlay)
                         {
-                            elnObj.SetData(0, details.ElnPreviewPath, 4);
+                            if (!string.IsNullOrEmpty(transparentPngPath) && File.Exists(transparentPngPath))
+                            {
+                                elnObj.SetData(0, transparentPngPath, 4);
+                            }
                         }
-                        else if (!string.IsNullOrEmpty(transparentPngPath) && File.Exists(transparentPngPath))
+                        else
                         {
-                            elnObj.SetData(0, transparentPngPath, 4);
+                            string effectiveElnPath = !string.IsNullOrEmpty(preparedElnImagePath) && File.Exists(preparedElnImagePath)
+                                ? preparedElnImagePath
+                                : details.ElnPreviewPath;
+                            if (!string.IsNullOrEmpty(effectiveElnPath) && File.Exists(effectiveElnPath))
+                            {
+                                elnObj.SetData(0, effectiveElnPath, 4);
+                            }
+                            else if (!string.IsNullOrEmpty(transparentPngPath) && File.Exists(transparentPngPath))
+                            {
+                                elnObj.SetData(0, transparentPngPath, 4);
+                            }
                         }
                     }
                 }

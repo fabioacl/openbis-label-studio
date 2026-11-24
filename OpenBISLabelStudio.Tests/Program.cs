@@ -70,7 +70,12 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms), AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms),
                 (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences),
                 (nameof(BackendMoleculeTemperatureOverrideIsolationAndPrintFlow), BackendMoleculeTemperatureOverrideIsolationAndPrintFlow),
-                (nameof(Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior), Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior)
+                (nameof(Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior), Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior),
+                (nameof(Form1ResizesControlsAndPreviewCardsProportionally), Form1ResizesControlsAndPreviewCardsProportionally),
+                (nameof(SetupSettingsFormResizesExamplePreviewColumnsProportionally), SetupSettingsFormResizesExamplePreviewColumnsProportionally),
+                (nameof(ResponsiveLayoutHelperComputesExactColumnsAndSplits), ResponsiveLayoutHelperComputesExactColumnsAndSplits),
+                (nameof(ElnImageProcessorTrimsWhitespacePreservesColoredInkAndHandlesOversizedImages), ElnImageProcessorTrimsWhitespacePreservesColoredInkAndHandlesOversizedImages),
+                (nameof(TryReadLbxMetadataReadsElnPreviewBoxAndHighDpiPreviewSetting), TryReadLbxMetadataReadsElnPreviewBoxAndHighDpiPreviewSetting)
             };
 
             int failures = 0;
@@ -4757,6 +4762,520 @@ namespace OpenBISLabelStudio.Tests
                 form.Dispose();
                 printRelease.TrySetResult(new LabelPrintBatchResult { AllSucceeded = true });
             }
+        }
+
+        private static void Form1ResizesControlsAndPreviewCardsProportionally()
+        {
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            var stub = new StubLabelStudioBackend(validPng);
+
+            using var form = new Form1(stub);
+            ShowOffscreen(form);
+            PumpEventsUntil(() => FindControl<ComboBox>(form, "openbisTypeComboBox").Items.Count >= 3,
+                "Expected startup types populated on Form1");
+
+            var lblType = FindControl<Label>(form, "openbisTypeLabel");
+            var cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
+            var cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+            var lblSortBy = FindControl<Label>(form, "sortByLabel");
+            var cmbSortBy = FindControl<ComboBox>(form, "sortByComboBox");
+            var btnSortDir = FindControl<Button>(form, "btnSortDirection");
+            var lblStatus = FindControl<Label>(form, "lblStatusNotice");
+            var prgLoading = FindControl<ProgressBar>(form, "prgLoading");
+
+            var grpBox = FindControl<GroupBox>(form, "smallBoxLabelGroupBox");
+            var grpMagnet = FindControl<GroupBox>(form, "magnetLabelGroupBox");
+            var grpFlask = FindControl<GroupBox>(form, "flaskLabelGroupBox");
+
+            var chkBox = FindControl<CheckBox>(form, "smallBoxLabelCheckBox");
+            var picBox = FindControl<PictureBox>(form, "smallBoxLabelPreview");
+            var lblBoxTemp = FindControl<Label>(form, "smallBoxEvapTempLabel");
+            var txtBoxTemp = FindControl<TextBox>(form, "smallBoxEvapTempBox");
+            var cmbBoxPrinter = FindControl<ComboBox>(form, "smallBoxPrinterComboBox");
+
+            var chkMag = FindControl<CheckBox>(form, "magnetLabelCheckBox");
+            var picMag = FindControl<PictureBox>(form, "magnetLabelPreview");
+            var txtMagTemp = FindControl<TextBox>(form, "magnetEvapTempBox");
+            var txtMagFt = FindControl<TextBox>(form, "magnetFreeTextBox");
+            var cmbMagPrinter = FindControl<ComboBox>(form, "magnetPrinterComboBox");
+
+            var chkFlask = FindControl<CheckBox>(form, "flaskLabelCheckBox");
+            var picFlask = FindControl<PictureBox>(form, "flaskLabelPreview");
+            var txtFlaskFt = FindControl<TextBox>(form, "flaskFreeTextBox");
+            var cmbFlaskPrinter = FindControl<ComboBox>(form, "flaskPrinterComboBox");
+
+            var btnLoad = FindControl<Button>(form, "loadPrintTemplates");
+            var btnPrint = FindControl<Button>(form, "btnPrintLabel");
+            var btnSettings = FindControl<Button>(form, "btnSettings");
+
+            static void AssertMainFormLayoutValid(
+                Form targetForm,
+                Label lblTypeCtrl,
+                ComboBox cmbTypesCtrl,
+                ComboBox cmbObjectsCtrl,
+                Label lblSortByCtrl,
+                ComboBox cmbSortByCtrl,
+                Button btnSortDirCtrl,
+                Label lblStatusCtrl,
+                ProgressBar prgLoadingCtrl,
+                GroupBox gBox,
+                GroupBox gMagnet,
+                GroupBox gFlask,
+                CheckBox cBox,
+                PictureBox pBox,
+                Label lBoxTemp,
+                TextBox tBoxTemp,
+                ComboBox cBoxPrinter,
+                CheckBox cMag,
+                PictureBox pMag,
+                TextBox tMagTemp,
+                TextBox tMagFt,
+                ComboBox cMagPrinter,
+                CheckBox cFlask,
+                PictureBox pFlask,
+                TextBox tFlaskFt,
+                ComboBox cFlaskPrinter,
+                Button bLoad,
+                Button bPrint,
+                Button bSettings,
+                string stage)
+            {
+                Rectangle clientRect = new Rectangle(Point.Empty, targetForm.ClientSize);
+                AssertTrue(clientRect.Contains(cmbTypesCtrl.Bounds), $"{stage}: cmbTypes {cmbTypesCtrl.Bounds} outside ClientSize {clientRect} (FormSize={targetForm.Size}, MinSize={targetForm.MinimumSize})");
+                AssertTrue(clientRect.Contains(cmbObjectsCtrl.Bounds), $"{stage}: cmbObjects {cmbObjectsCtrl.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(btnSortDirCtrl.Bounds), $"{stage}: btnSortDir {btnSortDirCtrl.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(gBox.Bounds), $"{stage}: smallBox group {gBox.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(gMagnet.Bounds), $"{stage}: magnet group {gMagnet.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(gFlask.Bounds), $"{stage}: flask group {gFlask.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(bLoad.Bounds), $"{stage}: btnLoad {bLoad.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(bPrint.Bounds), $"{stage}: btnPrint {bPrint.Bounds} outside ClientSize {clientRect}");
+                AssertTrue(clientRect.Contains(bSettings.Bounds), $"{stage}: btnSettings {bSettings.Bounds} outside ClientSize {clientRect}");
+
+                AssertEqual(cmbTypesCtrl.Right, btnSortDirCtrl.Right, $"{stage}: btnSortDir right must align with cmbTypes");
+                AssertEqual(cmbTypesCtrl.Right, prgLoadingCtrl.Right, $"{stage}: prgLoading right must align with cmbTypes");
+                AssertEqual(lblTypeCtrl.Left, gBox.Left, $"{stage}: smallBox left must align with openbisTypeLabel");
+                AssertEqual(cmbTypesCtrl.Right, gFlask.Right, $"{stage}: flask right must align with cmbTypes");
+
+                AssertTrue(Math.Abs(gBox.Width - gMagnet.Width) <= 2 && Math.Abs(gMagnet.Width - gFlask.Width) <= 2,
+                    $"{stage}: cards should share width proportionally ({gBox.Width}, {gMagnet.Width}, {gFlask.Width})");
+                AssertEqual(gBox.Top, gMagnet.Top, $"{stage}: cards top mismatch");
+                AssertEqual(gMagnet.Top, gFlask.Top, $"{stage}: cards top mismatch");
+                AssertEqual(gBox.Height, gMagnet.Height, $"{stage}: cards height mismatch");
+                AssertEqual(gMagnet.Height, gFlask.Height, $"{stage}: cards height mismatch");
+
+                AssertFalse(gBox.Bounds.IntersectsWith(gMagnet.Bounds), $"{stage}: smallBox overlaps magnet");
+                AssertFalse(gMagnet.Bounds.IntersectsWith(gFlask.Bounds), $"{stage}: magnet overlaps flask");
+                AssertFalse(cmbObjectsCtrl.Bounds.IntersectsWith(lblSortByCtrl.Bounds), $"{stage}: objects overlaps Sort label");
+                AssertFalse(lblStatusCtrl.Bounds.IntersectsWith(prgLoadingCtrl.Bounds), $"{stage}: status overlaps progress");
+                AssertFalse(gBox.Bounds.IntersectsWith(bLoad.Bounds), $"{stage}: smallBox overlaps footer buttons");
+                AssertFalse(gMagnet.Bounds.IntersectsWith(bPrint.Bounds), $"{stage}: magnet overlaps Print button");
+                AssertFalse(gFlask.Bounds.IntersectsWith(bSettings.Bounds), $"{stage}: flask overlaps Settings button");
+                AssertFalse(bLoad.Bounds.IntersectsWith(bPrint.Bounds), $"{stage}: btnLoad overlaps btnPrint");
+                AssertFalse(bPrint.Bounds.IntersectsWith(bSettings.Bounds), $"{stage}: btnPrint overlaps btnSettings");
+
+                int leftMargin = bLoad.Left;
+                int rightMargin = targetForm.ClientSize.Width - bSettings.Right;
+                AssertTrue(Math.Abs(leftMargin - rightMargin) <= 2,
+                    $"{stage}: footer buttons must stay centered ({leftMargin} vs {rightMargin})");
+
+                // Preview boxes must stay aligned and clear of checkboxes & bottom inputs
+                AssertEqual(pBox.Top, pMag.Top, $"{stage}: preview top must align");
+                AssertEqual(pMag.Top, pFlask.Top, $"{stage}: preview top must align");
+                AssertEqual(pBox.Height, pMag.Height, $"{stage}: preview height must align");
+                AssertEqual(pMag.Height, pFlask.Height, $"{stage}: preview height must align");
+
+                AssertTrue(gBox.ClientRectangle.Contains(pBox.Bounds), $"{stage}: picBox outside group");
+                AssertTrue(gBox.ClientRectangle.Contains(cBox.Bounds), $"{stage}: chkBox outside group");
+                AssertTrue(gBox.ClientRectangle.Contains(tBoxTemp.Bounds), $"{stage}: txtBoxTemp outside group");
+                AssertTrue(gBox.ClientRectangle.Contains(cBoxPrinter.Bounds), $"{stage}: cmbBoxPrinter outside group");
+                AssertFalse(cBox.Bounds.IntersectsWith(pBox.Bounds), $"{stage}: chkBox overlaps preview");
+                AssertFalse(pBox.Bounds.IntersectsWith(lBoxTemp.Bounds), $"{stage}: picBox overlaps temp label");
+                AssertFalse(tBoxTemp.Bounds.IntersectsWith(cBoxPrinter.Bounds), $"{stage}: txtBoxTemp overlaps printer");
+                AssertEqual(pBox.Width, tBoxTemp.Width, $"{stage}: txtBoxTemp width should match preview");
+                AssertEqual(pBox.Width, cBoxPrinter.Width, $"{stage}: cmbBoxPrinter width should match preview");
+
+                AssertTrue(gMagnet.ClientRectangle.Contains(cMag.Bounds), $"{stage}: chkMag outside group");
+                AssertTrue(gMagnet.ClientRectangle.Contains(pMag.Bounds), $"{stage}: picMag outside group");
+                AssertTrue(gMagnet.ClientRectangle.Contains(tMagTemp.Bounds), $"{stage}: txtMagTemp outside group");
+                AssertTrue(gMagnet.ClientRectangle.Contains(tMagFt.Bounds), $"{stage}: txtMagFt outside group");
+                AssertTrue(gMagnet.ClientRectangle.Contains(cMagPrinter.Bounds), $"{stage}: cmbMagPrinter outside group");
+                AssertFalse(cMag.Bounds.IntersectsWith(pMag.Bounds), $"{stage}: chkMag overlaps preview");
+                AssertEqual(pMag.Width, tMagTemp.Width, $"{stage}: txtMagTemp width should match preview");
+                AssertEqual(pMag.Width, tMagFt.Width, $"{stage}: txtMagFt width should match preview");
+                AssertEqual(tMagTemp.Top, tMagFt.Top, $"{stage}: magnet temp and free-text boxes must share Top");
+
+                AssertTrue(gFlask.ClientRectangle.Contains(cFlask.Bounds), $"{stage}: chkFlask outside group");
+                AssertTrue(gFlask.ClientRectangle.Contains(pFlask.Bounds), $"{stage}: picFlask outside group");
+                AssertTrue(gFlask.ClientRectangle.Contains(tFlaskFt.Bounds), $"{stage}: txtFlaskFt outside group");
+                AssertTrue(gFlask.ClientRectangle.Contains(cFlaskPrinter.Bounds), $"{stage}: cmbFlaskPrinter outside group");
+                AssertFalse(cFlask.Bounds.IntersectsWith(pFlask.Bounds), $"{stage}: chkFlask overlaps preview");
+                AssertEqual(pFlask.Width, tFlaskFt.Width, $"{stage}: txtFlaskFt width should match preview");
+                AssertEqual(pFlask.Width, cFlaskPrinter.Width, $"{stage}: cmbFlaskPrinter width should match preview");
+            }
+
+            int maxHalfScreenWidth = (int)Math.Ceiling(960.0 * Math.Max(96, form.DeviceDpi) / 96.0);
+            AssertTrue(form.MinimumSize.Width > 0 && form.MinimumSize.Height > 0, "Form1 must enforce a non-zero MinimumSize");
+            AssertTrue(form.MinimumSize.Width <= maxHalfScreenWidth, $"Form1 MinimumSize width ({form.MinimumSize.Width}) should allow half-screen snap (<= {maxHalfScreenWidth})");
+
+            AssertMainFormLayoutValid(
+                form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
+                grpBox, grpMagnet, grpFlask, chkBox, picBox, lblBoxTemp, txtBoxTemp, cmbBoxPrinter,
+                chkMag, picMag, txtMagTemp, txtMagFt, cmbMagPrinter, chkFlask, picFlask, txtFlaskFt, cmbFlaskPrinter,
+                btnLoad, btnPrint, btnSettings, "Default");
+
+            Size initialSize = form.ClientSize;
+            int initialTypesW = cmbTypes.Width;
+            int initialObjectsW = cmbObjects.Width;
+            int initialStatusW = lblStatus.Width;
+            int initialCardW = grpBox.Width;
+            int initialCardH = grpBox.Height;
+            int initialPicW = picBox.Width;
+            int initialPicH = picBox.Height;
+            int initialBtnTop = btnLoad.Top;
+
+            // Expand significantly (similar to 1080p maximized / large window)
+            form.ClientSize = new Size(initialSize.Width + 600, initialSize.Height + 390);
+            Application.DoEvents();
+
+            AssertTrue(cmbTypes.Width > initialTypesW + 500, "openbisTypeComboBox must expand horizontally");
+            AssertTrue(cmbObjects.Width > initialObjectsW + 500, "openbisObjectsComboBox must expand horizontally");
+            AssertTrue(lblStatus.Width > initialStatusW + 500, "lblStatusNotice must expand horizontally");
+            AssertTrue(grpBox.Width > initialCardW + 150, "Label cards must expand horizontally");
+            AssertTrue(grpBox.Height > initialCardH + 300, "Label cards must expand vertically");
+            AssertTrue(picBox.Width > initialPicW + 150, "Preview PictureBox must expand horizontally");
+            AssertTrue(picBox.Height > initialPicH + 300, "Preview PictureBox must expand vertically");
+            AssertTrue(btnLoad.Top > initialBtnTop + 300, "Footer buttons must track window bottom");
+
+            AssertMainFormLayoutValid(
+                form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
+                grpBox, grpMagnet, grpFlask, chkBox, picBox, lblBoxTemp, txtBoxTemp, cmbBoxPrinter,
+                chkMag, picMag, txtMagTemp, txtMagFt, cmbMagPrinter, chkFlask, picFlask, txtFlaskFt, cmbFlaskPrinter,
+                btnLoad, btnPrint, btnSettings, "Expanded");
+
+            // Switch type while expanded to confirm hidden/shown magnet controls keep aligned layout
+            int substrateIndex = -1;
+            for (int i = 0; i < cmbTypes.Items.Count; i++)
+            {
+                if (cmbTypes.Items[i] is TypeOptionDto opt && string.Equals(opt.Code, "SUBSTRATE", StringComparison.OrdinalIgnoreCase))
+                {
+                    substrateIndex = i;
+                    break;
+                }
+            }
+            AssertTrue(substrateIndex > 0, "Expected SUBSTRATE type option in stub startup types");
+            cmbTypes.SelectedIndex = substrateIndex;
+            Application.DoEvents();
+            AssertMainFormLayoutValid(
+                form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
+                grpBox, grpMagnet, grpFlask, chkBox, picBox, lblBoxTemp, txtBoxTemp, cmbBoxPrinter,
+                chkMag, picMag, txtMagTemp, txtMagFt, cmbMagPrinter, chkFlask, picFlask, txtFlaskFt, cmbFlaskPrinter,
+                btnLoad, btnPrint, btnSettings, "Expanded-Generic");
+
+            // Minimize then restore must not corrupt layout bounds
+            Size expandedClient = form.ClientSize;
+            form.WindowState = FormWindowState.Minimized;
+            Application.DoEvents();
+            form.WindowState = FormWindowState.Normal;
+            Application.DoEvents();
+            AssertEqual(expandedClient, form.ClientSize, "Restored ClientSize must match pre-minimize size");
+            AssertMainFormLayoutValid(
+                form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
+                grpBox, grpMagnet, grpFlask, chkBox, picBox, lblBoxTemp, txtBoxTemp, cmbBoxPrinter,
+                chkMag, picMag, txtMagTemp, txtMagFt, cmbMagPrinter, chkFlask, picFlask, txtFlaskFt, cmbFlaskPrinter,
+                btnLoad, btnPrint, btnSettings, "RestoredAfterMinimize");
+
+            // Attempt shrink below MinimumSize (via outer window Size, as border drag does) -> clamped safely without overlaps
+            form.Size = new Size(500, 250);
+            Application.DoEvents();
+            AssertEqual(form.MinimumSize, form.Size, "Shrinking below MinimumSize must clamp cleanly to MinimumSize");
+            AssertMainFormLayoutValid(
+                form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
+                grpBox, grpMagnet, grpFlask, chkBox, picBox, lblBoxTemp, txtBoxTemp, cmbBoxPrinter,
+                chkMag, picMag, txtMagTemp, txtMagFt, cmbMagPrinter, chkFlask, picFlask, txtFlaskFt, cmbFlaskPrinter,
+                btnLoad, btnPrint, btnSettings, "MinimumClamped");
+        }
+
+        private static void SetupSettingsFormResizesExamplePreviewColumnsProportionally()
+        {
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            var stub = new StubLabelStudioBackend(validPng);
+            using var form = new SetupSettingsForm(stub, SetupDialogMode.Settings, SetupWizardStep.ObjectTypes);
+            ShowOffscreen(form);
+            Application.DoEvents();
+
+            var dgv = FindControl<DataGridView>(form, "dgvObjectTypes");
+            var grpPreviews = FindControl<GroupBox>(form, "grpExamplePreviews");
+            var btnMol = FindControl<Button>(form, "btnPreviewMolecule");
+            var btnGen = FindControl<Button>(form, "btnPreviewGeneric");
+            var lblHint = FindControl<Label>(form, "lblPreviewActiveHint");
+            var lblSmall = FindControl<Label>(form, "lblPreviewSmallBoxTitle");
+            var lblMag = FindControl<Label>(form, "lblPreviewMagnetTitle");
+            var lblFlask = FindControl<Label>(form, "lblPreviewFlaskTitle");
+            var picSmall = FindControl<PictureBox>(form, "picPreviewSmallBox");
+            var picMag = FindControl<PictureBox>(form, "picPreviewMagnet");
+            var picFlask = FindControl<PictureBox>(form, "picPreviewFlask");
+            var lblConnStatus = FindControl<Label>(form, "lblConnectionStatus");
+
+            AssertTrue((lblConnStatus.Anchor & AnchorStyles.Bottom) != 0, "lblConnectionStatus should anchor Bottom to grow vertically");
+
+            int initialDgvH = dgv.Height;
+            int initialGrpW = grpPreviews.Width;
+            int initialGrpH = grpPreviews.Height;
+            int initialPicW = picSmall.Width;
+            int initialPicH = picSmall.Height;
+
+            form.ClientSize = new Size(form.ClientSize.Width + 500, form.ClientSize.Height + 260);
+            Application.DoEvents();
+
+            AssertTrue(dgv.Height > initialDgvH + 80, "Object types grid must grow vertically on resize");
+            AssertTrue(grpPreviews.Width > initialGrpW + 450, "Example previews GroupBox must expand horizontally");
+            AssertTrue(grpPreviews.Height > initialGrpH + 60, "Example previews GroupBox must grow vertically on resize");
+
+            AssertTrue(picSmall.Width > initialPicW + 120, "SmallBox example preview must expand horizontally");
+            AssertTrue(picMag.Width > initialPicW + 120, "Magnet example preview must expand horizontally");
+            AssertTrue(picFlask.Width > initialPicW + 120, "Flask example preview must expand horizontally");
+            AssertTrue(picSmall.Height > initialPicH + 60, "Example preview PictureBoxes must expand vertically");
+
+            AssertTrue(Math.Abs(picSmall.Width - picMag.Width) <= 2 && Math.Abs(picMag.Width - picFlask.Width) <= 2,
+                $"Example preview widths should stay balanced ({picSmall.Width}, {picMag.Width}, {picFlask.Width})");
+            AssertEqual(picSmall.Left, lblSmall.Left, "SmallBox preview title must align with preview left edge");
+            AssertEqual(picMag.Left, lblMag.Left, "Magnet preview title must align with preview left edge");
+            AssertEqual(picFlask.Left, lblFlask.Left, "Flask preview title must align with preview left edge");
+
+            AssertFalse(picSmall.Bounds.IntersectsWith(picMag.Bounds), "SmallBox preview overlaps Magnet preview");
+            AssertFalse(picMag.Bounds.IntersectsWith(picFlask.Bounds), "Magnet preview overlaps Flask preview");
+            AssertFalse(btnMol.Bounds.IntersectsWith(lblSmall.Bounds), "Toggle button overlaps preview title");
+            AssertFalse(btnGen.Bounds.IntersectsWith(lblMag.Bounds), "Generic toggle overlaps Magnet title");
+            AssertFalse(lblHint.Bounds.IntersectsWith(lblFlask.Bounds), "Hint overlaps Flask title");
+            AssertFalse(dgv.Bounds.IntersectsWith(grpPreviews.Bounds), "ObjectTypes grid overlaps grpExamplePreviews");
+
+            // Also verify resizing while on Connection tab still yields expanded previews when switching to ObjectTypes
+            using var tabForm = new SetupSettingsForm(stub, SetupDialogMode.Settings, SetupWizardStep.Connection);
+            ShowOffscreen(tabForm);
+            tabForm.Size = new Size(tabForm.Width + 420, tabForm.Height + 240);
+            Application.DoEvents();
+            FindControl<Button>(tabForm, "btnTabObjectTypes").PerformClick();
+            Application.DoEvents();
+            var tabPicSmall = FindControl<PictureBox>(tabForm, "picPreviewSmallBox");
+            var tabPicFlask = FindControl<PictureBox>(tabForm, "picPreviewFlask");
+            var tabGrp = FindControl<GroupBox>(tabForm, "grpExamplePreviews");
+            AssertTrue(tabPicSmall.Width > initialPicW + 100 && tabPicFlask.Width > initialPicW + 100,
+                "Resizing before switching to ObjectTypes tab must scale example previews");
+            AssertEqual(tabGrp.ClientSize.Width - tabPicSmall.Left, tabPicFlask.Right,
+                "Flask preview right edge must match symmetric margin");
+        }
+
+        private static void ResponsiveLayoutHelperComputesExactColumnsAndSplits()
+        {
+            var cols = ResponsiveLayoutHelper.ComputeHorizontalColumns(40, 1040, 25, 3);
+            AssertEqual(3, cols.Length, "Expected 3 columns");
+            AssertEqual(40, cols[0].Left, "Col 0 left mismatch");
+            AssertEqual(317, cols[0].Width, "Col 0 width mismatch");
+            AssertEqual(382, cols[1].Left, "Col 1 left mismatch");
+            AssertEqual(317, cols[1].Width, "Col 1 width mismatch");
+            AssertEqual(724, cols[2].Left, "Col 2 left mismatch");
+            AssertEqual(316, cols[2].Width, "Col 2 width mismatch");
+            AssertEqual(1040, cols[2].Left + cols[2].Width, "Last column must align with right edge");
+
+            var narrowSplit = ResponsiveLayoutHelper.ComputeResponsiveSplit(250, 230, 224, 160, 190);
+            AssertEqual(350, narrowSplit.FirstHeight + narrowSplit.SecondHeight, "Split below mins must honor summed mins");
+            AssertTrue(narrowSplit.FirstHeight >= 160 && narrowSplit.SecondHeight >= 190, "Split must respect mins");
+
+            var expandedSplit = ResponsiveLayoutHelper.ComputeResponsiveSplit(908, 230, 224, 160, 190);
+            AssertEqual(908, expandedSplit.FirstHeight + expandedSplit.SecondHeight, "Expanded split must use full height");
+            AssertTrue(expandedSplit.FirstHeight > 440 && expandedSplit.SecondHeight > 430,
+                $"Both grid and preview pane should grow proportionally ({expandedSplit.FirstHeight}, {expandedSplit.SecondHeight})");
+        }
+
+        private static void ElnImageProcessorTrimsWhitespacePreservesColoredInkAndHandlesOversizedImages()
+        {
+            WithTempDir(tempDir =>
+            {
+                // 1. Wide molecule inside 300x300 white padding with black, cyan-blue (N), and red (O) strokes.
+                string srcPath = Path.Combine(tempDir, "mol_colored.png");
+                using (var bmp = new Bitmap(300, 300, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.White);
+                    using var blackPen = new Pen(Color.Black, 2f);
+                    using var bluePen = new Pen(Color.FromArgb(0, 160, 255), 2f);
+                    using var redPen = new Pen(Color.FromArgb(240, 20, 20), 2f);
+                    g.DrawLine(blackPen, 16, 120, 120, 175);
+                    g.DrawLine(bluePen, 130, 120, 190, 175);
+                    g.DrawLine(redPen, 200, 120, 284, 175);
+                    bmp.Save(srcPath, System.Drawing.Imaging.ImageFormat.Png);
+                }
+
+                using Bitmap? previewBmp = ElnImageProcessor.BuildPreparedElnPreviewBitmap(srcPath, 429, 411);
+                AssertNotNull(previewBmp, "Expected prepared ELN preview bitmap");
+                AssertTrue(previewBmp!.Width >= 420 && previewBmp.Width <= 429,
+                    $"Trimmed wide molecule should fill box width (~429), got {previewBmp.Width}x{previewBmp.Height}");
+                AssertTrue(previewBmp.Height < 200,
+                    $"Trimmed wide molecule should stay proportional without vertical blank padding, got {previewBmp.Height}");
+
+                // Verify all three regions (left black, center formerly-cyan blue, right formerly-red) rendered as dark ink.
+                bool HasDarkInkInRegion(Bitmap target, int xStart, int xEnd)
+                {
+                    for (int y = 0; y < target.Height; y++)
+                    {
+                        for (int x = Math.Max(0, xStart); x < Math.Min(target.Width, xEnd); x++)
+                        {
+                            Color c = target.GetPixel(x, y);
+                            if (c.R < 80 && c.G < 80 && c.B < 80)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+
+                AssertTrue(HasDarkInkInRegion(previewBmp, 10, previewBmp.Width / 3), "Expected dark ink in black bond band");
+                AssertTrue(HasDarkInkInRegion(previewBmp, previewBmp.Width / 3, (2 * previewBmp.Width) / 3),
+                    "Expected cyan-blue heteroatom strokes to convert to dark crisp ink");
+                AssertTrue(HasDarkInkInRegion(previewBmp, (2 * previewBmp.Width) / 3, previewBmp.Width - 10),
+                    "Expected red heteroatom strokes to convert to dark crisp ink");
+
+                // 2. Oversized transparent PNG (2400x2200) must clamp safely without losing strokes or making background black.
+                string hugeTransPath = Path.Combine(tempDir, "huge_transparent.png");
+                using (var big = new Bitmap(2400, 2200, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(big))
+                {
+                    g.Clear(Color.Transparent);
+                    using var strokePen = new Pen(Color.FromArgb(0, 140, 240), 10f);
+                    g.DrawRectangle(strokePen, 200, 300, 2000, 1600);
+                    big.Save(hugeTransPath, System.Drawing.Imaging.ImageFormat.Png);
+                }
+
+                using Bitmap? bigPrepared = ElnImageProcessor.BuildPreparedElnPreviewBitmap(hugeTransPath, 429, 411);
+                AssertNotNull(bigPrepared, "Expected prepared bitmap for oversized transparent PNG");
+                Color centerBg = bigPrepared!.GetPixel(bigPrepared.Width / 2, bigPrepared.Height / 2);
+                AssertTrue(centerBg.R >= 250 && centerBg.G >= 250 && centerBg.B >= 250,
+                    $"Transparent interior must composite to pure white, got {centerBg}");
+                AssertTrue(HasDarkInkInRegion(bigPrepared, 0, bigPrepared.Width / 4),
+                    "Oversized transparent PNG ink border must remain crisp dark ink");
+
+                // 3. Prepared print PNG matches target box aspect ratio (centered white padding) for b-PAC TOPLEFT alignment.
+                string? printPngPath = ElnImageProcessor.TryCreatePreparedPrintPng(srcPath, 42.9, 41.1);
+                try
+                {
+                    AssertNotNull(printPngPath, "Expected prepared print PNG path");
+                    AssertTrue(File.Exists(printPngPath!), "Prepared print PNG file must exist on disk");
+                    using var printImg = new Bitmap(printPngPath!);
+                    double expectedAspect = 42.9 / 41.1;
+                    double actualAspect = (double)printImg.Width / printImg.Height;
+                    AssertTrue(Math.Abs(expectedAspect - actualAspect) < 0.05,
+                        $"Prepared print PNG aspect ({actualAspect:F3}) should match target b-PAC slot ({expectedAspect:F3})");
+                    Color topCenter = printImg.GetPixel(printImg.Width / 2, 10);
+                    AssertTrue(topCenter.R >= 250 && topCenter.G >= 250 && topCenter.B >= 250,
+                        "Centered wide molecule should keep top padding white so b-PAC centers it vertically");
+                    AssertTrue(HasDarkInkInRegion(printImg, printImg.Width / 3, (2 * printImg.Width) / 3),
+                        "Prepared print PNG must retain converted cyan heteroatom ink");
+                }
+                finally
+                {
+                    if (!string.IsNullOrEmpty(printPngPath) && File.Exists(printPngPath))
+                    {
+                        File.Delete(printPngPath);
+                    }
+                }
+            });
+        }
+
+        private static void TryReadLbxMetadataReadsElnPreviewBoxAndHighDpiPreviewSetting()
+        {
+            AssertEqual(360, LabelPreviewRenderer.ExportResolutionDpi, "Base ExportResolutionDpi should remain 360 for layout metadata API");
+            AssertTrue(LabelPreviewRenderer.PreviewExportResolutionDpi >= 720,
+                "PreviewExportResolutionDpi should be at least 720 DPI for crisp expanded UI previews");
+
+            string templatePath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "templates",
+                "template_molecule_flask_24mm.lbx");
+            AssertTrue(File.Exists(templatePath), $"Missing molecule flask template at {templatePath}");
+
+            bool foundElnBox = LabelPreviewRenderer.TryReadLbxElnPreviewBoundsPt(
+                templatePath,
+                out double xPt,
+                out double yPt,
+                out double widthPt,
+                out double heightPt,
+                out double angleDeg);
+
+            AssertTrue(foundElnBox, "Expected elnPreview object bounds in template_molecule_flask_24mm.lbx");
+            AssertTrue(Math.Abs(xPt - 15.8) < 0.1, $"Expected elnPreview x ~15.8pt, got {xPt}");
+            AssertTrue(Math.Abs(yPt - 8.4) < 0.1, $"Expected elnPreview y ~8.4pt, got {yPt}");
+            AssertTrue(Math.Abs(widthPt - 42.9) < 0.1, $"Expected elnPreview width ~42.9pt, got {widthPt}");
+            AssertTrue(Math.Abs(heightPt - 41.1) < 0.1, $"Expected elnPreview height ~41.1pt, got {heightPt}");
+            AssertTrue(Math.Abs(angleDeg) < 0.1, $"Expected elnPreview angle 0deg, got {angleDeg}");
+
+            // Verify end-to-end 720-DPI preview rendering with high-contrast ELN overlay when b-PAC COM is available.
+            WithTempDir(tempDir =>
+            {
+                string tplDir = Path.Combine(tempDir, "templates");
+                Directory.CreateDirectory(tplDir);
+                File.Copy(templatePath, Path.Combine(tplDir, "template_molecule_flask_24mm.lbx"), overwrite: true);
+
+                string elnSrc = Path.Combine(tempDir, "eln_test.png");
+                using (var molBmp = new Bitmap(300, 300, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (var g = Graphics.FromImage(molBmp))
+                {
+                    g.Clear(Color.White);
+                    using var bluePen = new Pen(Color.FromArgb(0, 160, 255), 3f);
+                    g.DrawLine(bluePen, 20, 145, 280, 145);
+                    molBmp.Save(elnSrc, System.Drawing.Imaging.ImageFormat.Png);
+                }
+
+                var cfg = new AppConfigService(tempDir);
+                var renderer = new LabelPreviewRenderer(cfg);
+                var sample = new SampleDetailsDto
+                {
+                    PermId = "2026-TEST-ELN",
+                    Name = "526a",
+                    StorageLocation = "G20D",
+                    ElnPreviewPath = elnSrc
+                };
+
+                using Image rendered = renderer.RenderTemplatePreview(
+                    LabelTemplateType.Flask24mm,
+                    LabelTemplateProfile.Molecule,
+                    sample);
+                AssertTrue(rendered.Width > 0 && rendered.Height > 0, "Rendered image must be non-empty");
+
+                if (rendered.Width == 1092 && rendered.Height == 680 && rendered is Bitmap renderedBmp)
+                {
+                    // Check center horizontal line inside (158, 84, 429, 411) contains crisp dark ink from the cyan line.
+                    bool hasDarkInk = false;
+                    int midY = 84 + 411 / 2;
+                    for (int y = midY - 12; y <= midY + 12 && !hasDarkInk; y++)
+                    {
+                        for (int x = 165; x < 158 + 429 - 10; x++)
+                        {
+                            Color c = renderedBmp.GetPixel(x, y);
+                            if (c.R < 60 && c.G < 60 && c.B < 60)
+                            {
+                                hasDarkInk = true;
+                                break;
+                            }
+                        }
+                    }
+                    AssertTrue(hasDarkInk, "720-DPI rendered Flask label must overlay crisp dark ink in elnPreview center");
+                }
+            });
         }
 
         private static void ShowOffscreen(Form form)

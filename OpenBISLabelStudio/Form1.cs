@@ -55,6 +55,16 @@ namespace OpenBISLabelStudio
         private string _persistentNoticeMessage = "";
         private string? _persistentNoticeTooltip;
         private Icon? _windowIcon;
+        private bool _hasLayoutBaseline;
+        private bool _isApplyingResponsiveLayout;
+        private int _initialDpi = 96;
+        private int _baseClientWidth = 1080;
+        private int _baseClientHeight = 530;
+        private int _baseCardGap = 25;
+        private int _baseCardsToButtonsGap = 18;
+        private int _baseButtonsBottomMargin = 22;
+        private int _baseButtonGap = 40;
+        private int _baseMinCardHeight = 296;
 
         public Form1()
             : this(new OpenBISLabelStudio.Backend.Services.LabelStudioBackend(), ownsBackend: true)
@@ -73,10 +83,108 @@ namespace OpenBISLabelStudio
             _recoveryPrompter = new FormTokenRecoveryPrompter(this, _backend);
 
             InitializeComponent();
+            DoubleBuffered = true;
+            CaptureBaselineLayoutMetrics();
+            UpdateResponsiveLayout();
             InitializeSortControls();
             RegisterClickOutsideFocusClear(this);
             UpdateTemplateInputControlsState();
             AppIconProvider.AttachWindowIcon(this, ref _windowIcon);
+        }
+
+        protected override void OnLayout(LayoutEventArgs levent)
+        {
+            base.OnLayout(levent);
+            UpdateResponsiveLayout();
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            MinimumSize = Size.Empty;
+            base.OnDpiChanged(e);
+            ApplyMinimumWindowSize();
+            UpdateResponsiveLayout();
+        }
+
+        private void CaptureBaselineLayoutMetrics()
+        {
+            _initialDpi = Math.Max(96, DeviceDpi);
+            _baseClientWidth = Math.Max(1, ClientSize.Width);
+            _baseClientHeight = Math.Max(1, ClientSize.Height);
+            _baseCardGap = Math.Max(4, magnetLabelGroupBox.Left - smallBoxLabelGroupBox.Right);
+            _baseCardsToButtonsGap = Math.Max(4, loadPrintTemplates.Top - smallBoxLabelGroupBox.Bottom);
+            _baseButtonsBottomMargin = Math.Max(4, _baseClientHeight - loadPrintTemplates.Bottom);
+            _baseButtonGap = Math.Max(4, btnPrintLabel.Left - loadPrintTemplates.Right);
+            _baseMinCardHeight = Math.Max(120, (int)Math.Round(smallBoxLabelGroupBox.Height * (296.0 / 326.0)));
+            _hasLayoutBaseline = true;
+            ApplyMinimumWindowSize();
+        }
+
+        private void ApplyMinimumWindowSize()
+        {
+            if (!_hasLayoutBaseline)
+            {
+                return;
+            }
+
+            double dpiRatio = (double)Math.Max(96, DeviceDpi) / _initialDpi;
+            int minClientW = (int)Math.Round(_baseClientWidth * (900.0 / 1080.0) * dpiRatio);
+            int minClientH = (int)Math.Round(_baseClientHeight * (500.0 / 530.0) * dpiRatio);
+            MinimumSize = SizeFromClientSize(new Size(minClientW, minClientH));
+        }
+
+        private void UpdateResponsiveLayout()
+        {
+            if (!_hasLayoutBaseline || _isApplyingResponsiveLayout || IsDisposed)
+            {
+                return;
+            }
+
+            if (WindowState == FormWindowState.Minimized || ClientSize.Width <= 0 || ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            double dpiRatio = (double)Math.Max(96, DeviceDpi) / _initialDpi;
+            int cardGap = Math.Max(4, (int)Math.Round(_baseCardGap * dpiRatio));
+            int cardsToButtonsGap = Math.Max(4, (int)Math.Round(_baseCardsToButtonsGap * dpiRatio));
+            int buttonsBottomMargin = Math.Max(4, (int)Math.Round(_baseButtonsBottomMargin * dpiRatio));
+            int buttonGap = Math.Max(4, (int)Math.Round(_baseButtonGap * dpiRatio));
+            int minCardHeight = Math.Max(120, (int)Math.Round(_baseMinCardHeight * dpiRatio));
+
+            _isApplyingResponsiveLayout = true;
+            try
+            {
+                SuspendLayout();
+                int buttonTop = Math.Max(0, ClientSize.Height - buttonsBottomMargin - loadPrintTemplates.Height);
+                ResponsiveLayoutHelper.CenterHorizontalRow(
+                    ClientSize.Width,
+                    buttonTop,
+                    buttonGap,
+                    loadPrintTemplates,
+                    btnPrintLabel,
+                    btnSettings);
+
+                int cardsLeft = openbisTypeLabel.Left;
+                int cardsRight = Math.Max(cardsLeft + 30, openbisTypeComboBox.Right);
+                int cardsTop = smallBoxLabelGroupBox.Top;
+                int cardsHeight = Math.Max(minCardHeight, buttonTop - cardsToButtonsGap - cardsTop);
+
+                ResponsiveLayoutHelper.LayoutEqualRow(
+                    cardsLeft,
+                    cardsRight,
+                    cardsTop,
+                    cardsHeight,
+                    cardGap,
+                    smallBoxLabelGroupBox,
+                    magnetLabelGroupBox,
+                    flaskLabelGroupBox);
+            }
+            finally
+            {
+                ResumeLayout(performLayout: false);
+                _isApplyingResponsiveLayout = false;
+            }
         }
 
         private sealed class SortFieldOption
