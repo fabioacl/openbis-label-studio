@@ -810,7 +810,7 @@ namespace OpenBISLabelStudio
             Controls.Add(pnlContentHost);
             Controls.Add(pnlBottomBar);
             Controls.Add(pnlTopBar);
-            MinimumSize = new Size(956, 719);
+            MaximizeBox = false;
             Name = "SetupSettingsForm";
             StartPosition = FormStartPosition.CenterParent;
             Text = "openBIS Label Studio Setup";

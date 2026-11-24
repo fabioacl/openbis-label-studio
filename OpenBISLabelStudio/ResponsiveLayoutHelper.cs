@@ -106,5 +106,35 @@ namespace OpenBISLabelStudio
             int second = Math.Max(minSecondHeight, safeTotal - first);
             return (first, second);
         }
+
+        /// <summary>
+        /// Computes DPI-scaled minimum and maximum client sizes relative to the form's
+        /// post-AutoScale baseline client dimensions.
+        /// </summary>
+        public static (Size MinClientSize, Size MaxClientSize) ComputeWindowClientBounds(
+            int baseClientWidth,
+            int baseClientHeight,
+            int initialDpi,
+            int currentDpi,
+            int designWidth,
+            int designHeight,
+            int minDesignWidth,
+            int minDesignHeight,
+            int maxDesignWidth,
+            int maxDesignHeight)
+        {
+            double dpiRatio = initialDpi > 0 ? (double)Math.Max(96, currentDpi) / initialDpi : 1.0;
+            double scaleX = ((double)baseClientWidth / designWidth) * dpiRatio;
+            double scaleY = ((double)baseClientHeight / designHeight) * dpiRatio;
+
+            var minClient = new Size(
+                Math.Max(1, (int)Math.Round(minDesignWidth * scaleX)),
+                Math.Max(1, (int)Math.Round(minDesignHeight * scaleY)));
+            var maxClient = new Size(
+                Math.Max(minClient.Width, (int)Math.Round(maxDesignWidth * scaleX)),
+                Math.Max(minClient.Height, (int)Math.Round(maxDesignHeight * scaleY)));
+
+            return (minClient, maxClient);
+        }
     }
 }
