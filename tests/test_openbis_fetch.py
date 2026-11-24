@@ -505,6 +505,22 @@ def test_extract_evaporation_temperature_supports_all_headers_and_last_row():
     ss_bracket_k = _make_spreadsheet(["Instrument", "Temperature [K]"], [["SRD", "520"]])
     assert openbis_fetch.extract_evaporation_temperature_info(ss_bracket_k) == ("520 K", "520")
 
+    ss_literal_unit = _make_spreadsheet(["Instrument", "Temperature [Unit]"], [["SRD", "140"]])
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_literal_unit) == ("140°C", "140")
+
+    class FakePandasNA:
+        def __bool__(self):
+            raise TypeError("boolean value of NA is ambiguous")
+
+        def __ne__(self, other):
+            return self
+
+    ss_pandas_na = _make_spreadsheet(
+        ["Instrument", "Temperature"],
+        [["SRD", "155"], ["VT", FakePandasNA()]],
+    )
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_pandas_na) == ("155°C", "155")
+
     assert openbis_fetch.extract_evaporation_temperature_info(None) == ("", "")
     assert openbis_fetch.extract_evaporation_temperature_info(_make_spreadsheet(["Instrument", "Temperature"], [])) == ("", "")
 

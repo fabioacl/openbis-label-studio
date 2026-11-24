@@ -4505,8 +4505,43 @@ namespace OpenBISLabelStudio.Tests
             }
 
             var stub = new StubLabelStudioBackend(validPng);
+            stub.OnLoadObjectsForTypeAsync = (typeCode, prompter, ct) =>
+            {
+                if (string.Equals(typeCode, "SUBSTANCE", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Task.FromResult(new SampleListResultDto
+                    {
+                        Success = true,
+                        Samples = new[]
+                        {
+                            new SampleSummaryDto { Name = "696a", PermId = "PERM-MOL-1", ModificationDate = "2026-11-23" },
+                            new SampleSummaryDto { Name = "24a", PermId = "PERM-MOL-2", ModificationDate = "2026-11-22" }
+                        }
+                    });
+                }
+
+                return Task.FromResult(new SampleListResultDto
+                {
+                    Success = true,
+                    Samples = new[]
+                    {
+                        new SampleSummaryDto { Name = "Wafer-1", PermId = "PERM-GEN-1", ModificationDate = "2026-11-20" }
+                    }
+                });
+            };
+            bool cancelNextLoad = false;
             stub.OnLoadSamplePreviewsAsync = (typeCode, permId, magnetFt, flaskFt, onSlotReady, prompter, ct) =>
             {
+                if (cancelNextLoad)
+                {
+                    return Task.FromResult(new SamplePreviewBundleDto
+                    {
+                        Success = false,
+                        WasCancelled = true,
+                        NoticeMessage = "Cancelled"
+                    });
+                }
+
                 bool isMolecule = string.Equals(typeCode, "SUBSTANCE", StringComparison.OrdinalIgnoreCase);
                 var slots = new Dictionary<LabelTemplateType, byte[]>
                 {
@@ -4586,7 +4621,7 @@ namespace OpenBISLabelStudio.Tests
             AssertTrue(subIdx > 0 && genIdx > 0, "Both SUBSTANCE and SUBSTRATE must exist in stub types");
 
             cmbTypes.SelectedIndex = subIdx;
-            PumpEventsUntil(() => cmbObjects.Items.Count == 1, "Timed out loading SUBSTANCE objects");
+            PumpEventsUntil(() => cmbObjects.Items.Count == 2, "Timed out loading SUBSTANCE objects");
             AssertTrue(lblBoxTemp.Visible && txtBoxTemp.Visible && txtBoxTemp.Enabled, "Molecule must show SmallBox Evap Temp");
             AssertTrue(lblMagTemp.Visible && txtMagTemp.Visible && txtMagTemp.Enabled, "Molecule must show Magnet Evap Temp");
             AssertFalse(lblMagFt.Visible || txtMagFt.Visible || txtMagFt.Enabled, "Molecule must hide Magnet Free Text");
@@ -4596,6 +4631,34 @@ namespace OpenBISLabelStudio.Tests
             PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 1 && txtBoxTemp.Text == "250°C (1 A",
                 "Timed out waiting for Molecule sample load & default temp");
             AssertEqual("250°C (1 A", txtMagTemp.Text, "Magnet Evap Temp box must initialize in sync with SmallBox");
+
+            var tooltipField = typeof(Form1).GetField("_statusToolTip", BindingFlags.NonPublic | BindingFlags.Instance);
+            var tipControl = tooltipField?.GetValue(form) as ToolTip;
+            AssertNotNull(tipControl, "Expected _statusToolTip field on Form1");
+            AssertTrue((tipControl!.GetToolTip(txtBoxTemp) ?? "").Contains("trimmed to 10 chars", StringComparison.OrdinalIgnoreCase),
+                $"Expected truncated-value tooltip hint, actual: {tipControl.GetToolTip(txtBoxTemp)}");
+
+            // Switching to a second object in openbisObjectsComboBox without clicking Load clears loaded temp/previews.
+            cmbObjects.SelectedIndex = 1;
+            Application.DoEvents();
+            AssertEqual("", txtBoxTemp.Text, "Switching openbisObjectsComboBox to another sample must clear SmallBox Evap Temp");
+            AssertEqual("", txtMagTemp.Text, "Switching openbisObjectsComboBox to another sample must clear Magnet Evap Temp");
+
+            // Load Sample 2 cleanly, then verify a cancelled reload clears stale Sample 2 Evap Temp instead of keeping it.
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 2 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out loading second Molecule sample");
+            cancelNextLoad = true;
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 3 && lblBoxTemp.Visible,
+                "Timed out waiting for cancelled reload");
+            AssertEqual("", txtBoxTemp.Text, "Cancelled sample load must clear stale SmallBox Evap Temp");
+            AssertEqual("", txtMagTemp.Text, "Cancelled sample load must clear stale Magnet Evap Temp");
+            cancelNextLoad = false;
+
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 4 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out reloading Molecule sample after cancel");
 
             // Typing syncs immediately without calling backend render until clicking outside.
             FocusTextBoxForClickOutsideTest(form, txtBoxTemp);
@@ -4637,7 +4700,7 @@ namespace OpenBISLabelStudio.Tests
             AssertTrue(lblFlaskFt.Visible && txtFlaskFt.Visible && txtFlaskFt.Enabled, "Generic must show Flask Free Text");
 
             btnLoad.PerformClick();
-            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 2, "Timed out loading Generic sample");
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 5, "Timed out loading Generic sample");
 
             FocusTextBoxForClickOutsideTest(form, txtFlaskFt);
             txtFlaskFt.Text = "Custom Flask";
@@ -4655,17 +4718,28 @@ namespace OpenBISLabelStudio.Tests
             AssertEqual(1, stub.RenderSlotWithFreeTextCalls.Count,
                 "Clicking outside Free Text without text changes must not re-render");
 
-            // 4. Switch back to SUBSTANCE and verify Print sends edited Molecule EvaporationTemperature without blocking on modal MessageBox.
+            // 4. Switch back to SUBSTANCE and verify Enter key commit + Print override.
             cmbTypes.SelectedIndex = subIdx;
-            PumpEventsUntil(() => cmbObjects.Items.Count == 1, "Timed out reloading SUBSTANCE objects");
+            PumpEventsUntil(() => cmbObjects.Items.Count == 2, "Timed out reloading SUBSTANCE objects");
             btnLoad.PerformClick();
-            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 3 && txtBoxTemp.Text == "250°C (1 A",
-                "Timed out reloading Molecule sample before print");
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 6 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out reloading Molecule sample before Enter/print test");
+
+            FocusTextBoxForClickOutsideTest(form, txtBoxTemp);
+            txtBoxTemp.Text = "255°C";
+            MethodInfo? boxKeyDown = typeof(Form1).GetMethod(
+                "smallBoxEvapTempBox_KeyDown",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            AssertNotNull(boxKeyDown, "Expected smallBoxEvapTempBox_KeyDown handler on Form1");
+            boxKeyDown!.Invoke(form, new object[] { txtBoxTemp, new KeyEventArgs(Keys.Enter) });
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 3,
+                "Pressing Enter in Evap Temp box must trigger Molecule re-render");
+            AssertEqual("255°C", stub.RenderMoleculeEvaporationTemperatureCalls[2], "Enter commit temperature mismatch");
 
             FocusTextBoxForClickOutsideTest(form, txtMagTemp);
             txtMagTemp.Text = "260°C";
             RaiseMouseDown(picMag);
-            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 3,
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 4,
                 "Expected Molecule temperature re-render before Print");
 
             var printRelease = new TaskCompletionSource<LabelPrintBatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);

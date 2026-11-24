@@ -113,6 +113,7 @@ namespace OpenBISLabelStudio
             openbisObjectsComboBox.Name = "openbisObjectsComboBox";
             openbisObjectsComboBox.Size = new Size(605, 28);
             openbisObjectsComboBox.TabIndex = 3;
+            openbisObjectsComboBox.SelectedIndexChanged += openbisObjectsComboBox_SelectedIndexChanged;
             // 
             // sortByLabel
             // 

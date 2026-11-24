@@ -165,7 +165,7 @@ def _is_missing_cell(value) -> bool:
         if value != value:
             return True
     except (TypeError, ValueError):
-        return False
+        return True
     return False
 
 
@@ -175,6 +175,8 @@ def _normalize_temperature_unit(raw_unit: str) -> str:
     if not cleaned:
         return ""
     compact = cleaned.replace(" ", "").lower()
+    if compact in ("unit", "units"):
+        return ""
     if compact in ("c", "°c", "℃"):
         return "°C"
     if compact == "k":

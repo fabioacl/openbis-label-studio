@@ -33,6 +33,7 @@ namespace OpenBISLabelStudio
         private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
+        private bool _isPopulatingObjects;
         private bool _isUpdatingSortControls;
         private bool _isSyncingEvapTemp;
         private string _lastCommittedEvapTemp = "";
@@ -139,6 +140,7 @@ namespace OpenBISLabelStudio
                 _currentSortDirection);
 
             openbisObjectsComboBox.BeginUpdate();
+            _isPopulatingObjects = true;
             try
             {
                 openbisObjectsComboBox.Items.Clear();
@@ -166,8 +168,41 @@ namespace OpenBISLabelStudio
             }
             finally
             {
+                _isPopulatingObjects = false;
                 openbisObjectsComboBox.EndUpdate();
             }
+
+            if (_hasLoadedSample)
+            {
+                string currentPermId = (openbisObjectsComboBox.SelectedItem as SampleSummaryDto)?.PermId ?? "";
+                if (!string.Equals(currentPermId, _loadedSamplePermId, StringComparison.OrdinalIgnoreCase))
+                {
+                    InvalidateLoadedSampleState();
+                }
+            }
+        }
+
+        private void openbisObjectsComboBox_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (_isPopulatingObjects)
+            {
+                return;
+            }
+
+            string selectedPermId = (openbisObjectsComboBox.SelectedItem as SampleSummaryDto)?.PermId ?? "";
+            if (_hasLoadedSample
+                && !string.Equals(selectedPermId, _loadedSamplePermId, StringComparison.OrdinalIgnoreCase))
+            {
+                InvalidateLoadedSampleState();
+            }
+        }
+
+        private void InvalidateLoadedSampleState()
+        {
+            ++_sampleDetailsRequestVersion;
+            CancelPendingSampleLoad();
+            _backend.ClearActiveSample();
+            ClearAllPreviews();
         }
 
         private void sortByComboBox_SelectedIndexChanged(object? sender, EventArgs e)
@@ -735,6 +770,7 @@ namespace OpenBISLabelStudio
             _loadedSampleName = "";
             _loadedSamplePermId = "";
             _loadedSampleLabel = "";
+            ClearEvapTempControls();
             _backend.ClearActiveSample();
 
             var cts = new CancellationTokenSource();
@@ -932,23 +968,19 @@ namespace OpenBISLabelStudio
         // =========================================================================
         private void RegisterClickOutsideFocusClear(Control root)
         {
-            root.MouseDown += NonInputControl_MouseDown;
+            if (root is TextBoxBase)
+            {
+                return;
+            }
+
+            if (root is Form or GroupBox or Label or PictureBox or ProgressBar)
+            {
+                root.MouseDown += NonInputControl_MouseDown;
+            }
+
             foreach (Control child in root.Controls)
             {
-                if (child is TextBoxBase)
-                {
-                    continue;
-                }
-
-                if (child is GroupBox or Label or PictureBox or ProgressBar)
-                {
-                    child.MouseDown += NonInputControl_MouseDown;
-                }
-
-                if (child.HasChildren)
-                {
-                    RegisterClickOutsideFocusClear(child);
-                }
+                RegisterClickOutsideFocusClear(child);
             }
         }
 
@@ -1117,9 +1149,13 @@ namespace OpenBISLabelStudio
             {
                 tooltip = "Overrides the printed evaporation temperature locally (does not modify openBIS).";
             }
-            else if (!string.Equals(rawTemp, displayedTemp, StringComparison.Ordinal))
+            else if (rawTemp.Trim().Length > 10 && displayedTemp.Length <= 10 && !string.Equals(rawTemp, displayedTemp, StringComparison.Ordinal))
             {
                 tooltip = $"openBIS value: {rawTemp} (trimmed to 10 chars; edit here to override printout)";
+            }
+            else if (!string.Equals(rawTemp, displayedTemp, StringComparison.Ordinal))
+            {
+                tooltip = $"openBIS value: {rawTemp} (normalized to {displayedTemp}; edit here to override printout)";
             }
             else
             {
@@ -1639,6 +1675,7 @@ namespace OpenBISLabelStudio
             if (cancelledSampleLoad)
             {
                 ClearSlotPreviewImages();
+                ClearEvapTempControls();
             }
 
             if (cancelledTypeSelection || cancelledSampleLoad)
