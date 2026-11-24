@@ -150,47 +150,111 @@ def check_connection(openbis_url, token):
         return {"success": False, "errorType": classify_error(e), "error": str(e)}
 
 
-def extract_evaporation_temperature(spreadsheet):
+_TEMP_HEADER_T_RE = re.compile(r"^t(?:\s*[\[(]\s*([^\])]+?)\s*[\])])?$", re.IGNORECASE)
+_TEMP_HEADER_WORD_RE = re.compile(r"\btemperature\b(?:\s*[\[(]\s*([^\])]+?)\s*[\])])?", re.IGNORECASE)
+_TEMP_NUM_ONLY_RE = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
+_TEMP_NUM_UNIT_RE = re.compile(r"^([+-]?\d+(?:[.,]\d+)?)\s*(°?\s*[CcKkFf]|℃)$")
+_MAX_NON_STANDARD_TEMP_LEN = 10
+
+
+def _is_missing_cell(value) -> bool:
+    """Return True if a spreadsheet cell value represents null/missing/NaN."""
+    if value is None:
+        return True
+    try:
+        if value != value:
+            return True
+    except (TypeError, ValueError):
+        return True
+    return False
+
+
+def _normalize_temperature_unit(raw_unit: str) -> str:
+    """Normalize temperature unit text into canonical °C, K, °F, or trimmed unit."""
+    cleaned = (raw_unit or "").strip()
+    if not cleaned:
+        return ""
+    compact = cleaned.replace(" ", "").lower()
+    if compact in ("unit", "units"):
+        return ""
+    if compact in ("c", "°c", "℃"):
+        return "°C"
+    if compact == "k":
+        return "K"
+    if compact in ("f", "°f"):
+        return "°F"
+    return cleaned
+
+
+def _format_numeric_temperature(number_text: str, raw_unit: str) -> str:
+    """Format a numeric temperature value with its canonical unit (defaulting to °C)."""
+    unit = _normalize_temperature_unit(raw_unit) or "°C"
+    if unit in ("°C", "°F"):
+        return f"{number_text}{unit}"
+    return f"{number_text} {unit}"
+
+
+def extract_evaporation_temperature_info(spreadsheet) -> tuple[str, str]:
     """
-    Extracts the evaporation temperature directly using the pyBIS Spreadsheet API.
+    Extract (formatted_temperature, raw_cell_value) from any pyBIS Spreadsheet temperature column.
+    Uses the last non-empty cell, defaults unitless numeric entries to Celsius (°C),
+    and truncates non-standard text/intervals to 10 characters max.
     """
     if spreadsheet is None:
-        return ""
+        return ("", "")
 
     headers = getattr(spreadsheet, "headers", None)
     data = getattr(spreadsheet, "data", None)
 
     if not headers or not data:
-        return ""
+        return ("", "")
 
-    # Find the column title strictly matching Temperature [Unit] (e.g. Temperature [K], Temperature [°C])
     temp_col_idx = -1
-    unit = ""
+    header_unit = ""
 
     for idx, h in enumerate(headers):
-        if not h:
+        if _is_missing_cell(h):
             continue
-        m = re.search(r'temperature\s*\[(.*?)\]', str(h).strip(), re.IGNORECASE)
+        h_text = str(h).strip()
+        if not h_text:
+            continue
+        m = _TEMP_HEADER_T_RE.match(h_text) or _TEMP_HEADER_WORD_RE.search(h_text)
         if m:
             temp_col_idx = idx
-            unit = m.group(1).strip()
+            header_unit = (m.group(1) or "").strip()
             break
 
-    # If the column title is not specified with Temperature [Unit], do not extract
     if temp_col_idx == -1:
-        return ""
+        return ("", "")
 
-    # Extract the value from the last row with a non-empty value in this column
     for row in reversed(data):
-        if not isinstance(row, list) or temp_col_idx >= len(row):
+        if not isinstance(row, (list, tuple)) or temp_col_idx >= len(row):
             continue
-        cell_val = str(row[temp_col_idx]).strip()
-        if cell_val:
-            if unit and unit.lower() not in cell_val.lower():
-                return f"{cell_val} {unit}"
-            return cell_val
+        raw_cell = row[temp_col_idx]
+        if _is_missing_cell(raw_cell):
+            continue
+        cell_val = str(raw_cell).strip()
+        if not cell_val:
+            continue
 
-    return ""
+        if _TEMP_NUM_ONLY_RE.match(cell_val):
+            return (_format_numeric_temperature(cell_val, header_unit), cell_val)
+
+        m_unit = _TEMP_NUM_UNIT_RE.match(cell_val)
+        if m_unit:
+            return (_format_numeric_temperature(m_unit.group(1), m_unit.group(2)), cell_val)
+
+        return (cell_val[:_MAX_NON_STANDARD_TEMP_LEN].rstrip(), cell_val)
+
+    return ("", "")
+
+
+def extract_evaporation_temperature(spreadsheet):
+    """
+    Extracts the evaporation temperature directly using the pyBIS Spreadsheet API.
+    """
+    formatted, _ = extract_evaporation_temperature_info(spreadsheet)
+    return formatted
 
 
 def _is_truthy_flag(value):
@@ -342,7 +406,7 @@ def fetch_sample_details(openbis_url, token, perm_id, skip_eln: bool = False, se
 
         # 4. Extract Evaporation Temperature using pyBIS Spreadsheet API
         spreadsheet = sample.props.evaporation_temperatures if hasattr(sample.props, 'evaporation_temperatures') else None
-        evaporation_temperature = extract_evaporation_temperature(spreadsheet)
+        evaporation_temperature, evaporation_temperature_raw = extract_evaporation_temperature_info(spreadsheet)
 
         # 5. Parse Special Storage Conditions & Icon Flags
         raw_cond = props.get('special_storage_conditions')
@@ -405,6 +469,7 @@ def fetch_sample_details(openbis_url, token, perm_id, skip_eln: bool = False, se
             "storageLocation": str(storage_location),
             "supplierOwnName": str(supplier_own_name),
             "evaporationTemperature": str(evaporation_temperature),
+            "evaporationTemperatureRaw": str(evaporation_temperature_raw),
             "specialStorageConditions": cond_list,
             "iconFlags": icon_flags,
             "elnPreviewPath": str(eln_preview_path),

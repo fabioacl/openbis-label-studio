@@ -475,3 +475,108 @@ def test_fetch_sample_types_excludes_managed_internally_types():
     assert all(set(t.keys()) == {"code", "description"} for t in res["types"])
 
 
+def _make_spreadsheet(headers, data):
+    return type("Spreadsheet", (), {"headers": headers, "data": data})()
+
+
+def test_extract_evaporation_temperature_supports_all_headers_and_last_row():
+    # Skips unrelated "Datetime" / "Template" / "Slot" headers, reads last non-empty cell ignoring None/NaN padding rows
+    ss_t = _make_spreadsheet(
+        ["Datetime", "Template", "Slot", "T"],
+        [
+            ["2025", "X", "1", "180°C"],
+            ["2026", "Y", "2", "210"],
+            [None, None, None, None],
+            ["", "", "", "  "],
+            ["2026", "Z", "3", float("nan")],
+        ],
+    )
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_t) == ("210°C", "210")
+
+    ss_lower = _make_spreadsheet(["instrument", "temperature"], [["SRD", "300"], ["LT", "275°C"]])
+    assert openbis_fetch.extract_evaporation_temperature(ss_lower) == "275°C"
+
+    ss_title = _make_spreadsheet(["Instrument", "Temperature"], [["PBQuarz", "450"]])
+    assert openbis_fetch.extract_evaporation_temperature(ss_title) == "450°C"
+
+    ss_paren_c = _make_spreadsheet(["Device", "Temperature (°C)"], [["SRD", "140"], ["6-fold", "150"]])
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_paren_c) == ("150°C", "150")
+
+    ss_bracket_k = _make_spreadsheet(["Instrument", "Temperature [K]"], [["SRD", "520"]])
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_bracket_k) == ("520 K", "520")
+
+    ss_literal_unit = _make_spreadsheet(["Instrument", "Temperature [Unit]"], [["SRD", "140"]])
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_literal_unit) == ("140°C", "140")
+
+    class FakePandasNA:
+        def __bool__(self):
+            raise TypeError("boolean value of NA is ambiguous")
+
+        def __ne__(self, other):
+            return self
+
+    ss_pandas_na = _make_spreadsheet(
+        ["Instrument", "Temperature"],
+        [["SRD", "155"], ["VT", FakePandasNA()]],
+    )
+    assert openbis_fetch.extract_evaporation_temperature_info(ss_pandas_na) == ("155°C", "155")
+
+    assert openbis_fetch.extract_evaporation_temperature_info(None) == ("", "")
+    assert openbis_fetch.extract_evaporation_temperature_info(_make_spreadsheet(["Instrument", "Temperature"], [])) == ("", "")
+
+
+def test_extract_evaporation_temperature_normalizes_units_and_caps_non_standard_text():
+    cases = [
+        (["instrument", "T"], [["SRD", "-12.5"]], ("-12.5°C", "-12.5")),
+        (["instrument", "T"], [["SRD", "200C"]], ("200°C", "200C")),
+        (["instrument", "T"], [["SRD", "407℃"]], ("407°C", "407℃")),
+        (["instrument", "T"], [["SRD", "60°c"]], ("60°C", "60°c")),
+        (["instrument", "T"], [["SRD", "140 °C"]], ("140°C", "140 °C")),
+        (["Instrument", "Temperature"], [["", "500 K"]], ("500 K", "500 K")),
+        (["Instrument", "Temperature"], [["", "500k"]], ("500 K", "500k")),
+        (["Instrument", "Temperature"], [["", "300°F"]], ("300°F", "300°F")),
+        (["Instrument", "Temperature"], [["SRD", "200 - 210"]], ("200 - 210", "200 - 210")),
+        (["Instrument", "Temperature"], [["SRD", "400-500°C"]], ("400-500°C", "400-500°C")),
+        (["Instrument", "Temperature"], [["SRD", ">400°C"]], (">400°C", ">400°C")),
+        (["Instrument", "Temperature"], [["", "RT"]], ("RT", "RT")),
+        (["instrument", "T"], [["QCM", "250°C (1 A/min)"]], ("250°C (1 A", "250°C (1 A/min)")),
+        (["instrument", "T"], [["TGA", "stable up to 240°C"]], ("stable up", "stable up to 240°C")),
+        (["instrument", "temperature"], [["SRD", "no subli"]], ("no subli", "no subli")),
+        (["Instrument", "Temperature"], [["SRD", "ST not reached"]], ("ST not rea", "ST not reached")),
+        (["Instrument", "Temperature"], [["SRD", "??"]], ("??", "??")),
+        (
+            ["Instrument", "Temperature"],
+            [["", "some subblimation rate above 450C"]],
+            ("some subbl", "some subblimation rate above 450C"),
+        ),
+    ]
+    for headers, data, expected in cases:
+        ss = _make_spreadsheet(headers, data)
+        actual = openbis_fetch.extract_evaporation_temperature_info(ss)
+        assert actual == expected
+        assert len(actual[0]) <= 10
+
+
+def test_fetch_sample_details_includes_evaporation_temperature_raw():
+    sample = MagicMock(
+        permId="2025-RAW-1",
+        type="SUBSTANCE",
+        registrator="jdoe",
+        parents=[],
+    )
+    sample.props = MagicMock(
+        return_value={"empa_number": "696", "batch": "a", "studied_by": "jdoe"},
+        evaporation_temperatures=_make_spreadsheet(["instrument", "T"], [["QCM", "250°C (1 A/min)"]]),
+    )
+    client = MagicMock()
+    client.get_sample.return_value = sample
+
+    with patch.object(openbis_fetch, "create_openbis_connection", return_value=client):
+        res = openbis_fetch.fetch_sample_details("https://openbis.example.org", "tok", "2025-RAW-1", skip_eln=True)
+
+    assert res["success"] is True
+    assert res["details"]["evaporationTemperature"] == "250°C (1 A"
+    assert res["details"]["evaporationTemperatureRaw"] == "250°C (1 A/min)"
+
+
+

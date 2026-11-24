@@ -68,7 +68,9 @@ namespace OpenBISLabelStudio.Tests
                 (nameof(Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls), Form1SortControlsReorderLoadedObjectsAndPreserveSelectionWithoutNetworkCalls),
                 (nameof(BackendFiltersOutManagedInternallyTypesInBuildAndServerSync), BackendFiltersOutManagedInternallyTypesInBuildAndServerSync),
                 (nameof(AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms), AppIconProviderLoadsMultiResolutionWindowIconAndAppliesToForms),
-                (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences)
+                (nameof(FrontendFormsContainNoBackendServiceOrSecretReferences), FrontendFormsContainNoBackendServiceOrSecretReferences),
+                (nameof(BackendMoleculeTemperatureOverrideIsolationAndPrintFlow), BackendMoleculeTemperatureOverrideIsolationAndPrintFlow),
+                (nameof(Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior), Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior)
             };
 
             int failures = 0;
@@ -1522,6 +1524,24 @@ namespace OpenBISLabelStudio.Tests
             AssertFalse(grpBox.Bounds.IntersectsWith(btnLoad.Bounds), "GroupBoxes must not overlap bottom buttons");
             AssertFalse(grpMagnet.Bounds.IntersectsWith(btnPrint.Bounds), "Magnet group must not overlap Print button");
             AssertFalse(grpFlask.Bounds.IntersectsWith(btnSettings.Bounds), "Flask group must not overlap Settings button");
+
+            var lblBoxTemp = FindControl<Label>(form, "smallBoxEvapTempLabel");
+            var txtBoxTemp = FindControl<TextBox>(form, "smallBoxEvapTempBox");
+            var lblMagTemp = FindControl<Label>(form, "magnetEvapTempLabel");
+            var txtMagTemp = FindControl<TextBox>(form, "magnetEvapTempBox");
+            var picBox = FindControl<PictureBox>(form, "smallBoxLabelPreview");
+            var lblBoxPrinter = FindControl<Label>(form, "smallBoxPrinterLabel");
+            var picMagnet = FindControl<PictureBox>(form, "magnetLabelPreview");
+            var lblMagPrinter = FindControl<Label>(form, "magnetPrinterLabel");
+
+            AssertTrue(grpBox.ClientRectangle.Contains(lblBoxTemp.Bounds), $"smallBoxEvapTempLabel outside GroupBox: {lblBoxTemp.Bounds}");
+            AssertTrue(grpBox.ClientRectangle.Contains(txtBoxTemp.Bounds), $"smallBoxEvapTempBox outside GroupBox: {txtBoxTemp.Bounds}");
+            AssertTrue(grpMagnet.ClientRectangle.Contains(lblMagTemp.Bounds), $"magnetEvapTempLabel outside GroupBox: {lblMagTemp.Bounds}");
+            AssertTrue(grpMagnet.ClientRectangle.Contains(txtMagTemp.Bounds), $"magnetEvapTempBox outside GroupBox: {txtMagTemp.Bounds}");
+            AssertFalse(txtBoxTemp.Bounds.IntersectsWith(picBox.Bounds), "smallBoxEvapTempBox must not overlap Small Box preview");
+            AssertFalse(txtBoxTemp.Bounds.IntersectsWith(lblBoxPrinter.Bounds), "smallBoxEvapTempBox must not overlap Small Box printer label");
+            AssertFalse(txtMagTemp.Bounds.IntersectsWith(picMagnet.Bounds), "magnetEvapTempBox must not overlap Magnet preview");
+            AssertFalse(txtMagTemp.Bounds.IntersectsWith(lblMagPrinter.Bounds), "magnetEvapTempBox must not overlap Magnet printer label");
         }
 
         private static void Form1LoadsCachedTypesOfflineHandlesZeroPrintersAndAutoSavesPrinterChanges()
@@ -2341,6 +2361,10 @@ namespace OpenBISLabelStudio.Tests
                 = new List<(string, string, string, string)>();
             public List<(LabelTemplateType Slot, string FreeText)> RenderSlotWithFreeTextCalls { get; }
                 = new List<(LabelTemplateType, string)>();
+            public List<string> RenderMoleculeEvaporationTemperatureCalls { get; }
+                = new List<string>();
+            public List<IReadOnlyList<PrintSlotSelection>> PrintSelectedLabelsCalls { get; }
+                = new List<IReadOnlyList<PrintSlotSelection>>();
             public List<LabelTemplateProfile> GetExamplePreviewsCalls { get; } = new List<LabelTemplateProfile>();
             public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string Reason)> GetFallbackPreviewCalls { get; }
                 = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
@@ -2351,6 +2375,7 @@ namespace OpenBISLabelStudio.Tests
             public Func<LabelTemplateProfile, Action<LabelTemplateType, byte[]>?, CancellationToken, Task<Dictionary<LabelTemplateType, byte[]>>>? OnGetExamplePreviewsAsync { get; set; }
             public Func<string, ITokenRecoveryPrompter?, CancellationToken, Task<SampleListResultDto>>? OnLoadObjectsForTypeAsync { get; set; }
             public Func<string, string, string, string, Action<LabelTemplateType, byte[]>?, ITokenRecoveryPrompter?, CancellationToken, Task<SamplePreviewBundleDto>>? OnLoadSamplePreviewsAsync { get; set; }
+            public Func<IReadOnlyList<PrintSlotSelection>, CancellationToken, Task<LabelPrintBatchResult>>? OnPrintSelectedLabelsAsync { get; set; }
 
             public void WarmUpInBackground()
             {
@@ -2620,16 +2645,45 @@ namespace OpenBISLabelStudio.Tests
                 return Task.FromResult(GetSlotPayload(slot));
             }
 
+            public Task<IReadOnlyDictionary<LabelTemplateType, byte[]>> RenderMoleculeEvaporationTemperatureAsync(
+                string evaporationTemperature,
+                CancellationToken ct = default)
+            {
+                lock (_callsLock)
+                {
+                    RenderMoleculeEvaporationTemperatureCalls.Add(evaporationTemperature);
+                }
+
+                IReadOnlyDictionary<LabelTemplateType, byte[]> slots = new Dictionary<LabelTemplateType, byte[]>
+                {
+                    [LabelTemplateType.SmallBox12mm] = GetSlotPayload(LabelTemplateType.SmallBox12mm),
+                    [LabelTemplateType.Magnet12mm] = GetSlotPayload(LabelTemplateType.Magnet12mm)
+                };
+                return Task.FromResult(slots);
+            }
+
             public Task<OperationResult> UpdatePrinterSelectionsAsync(
                 string smallBoxPrinter,
                 string magnetPrinter,
                 string flaskPrinter)
                 => Task.FromResult(OperationResult.Ok());
 
-            public Task<LabelPrintBatchResult> PrintSelectedLabelsAsync(
+            public async Task<LabelPrintBatchResult> PrintSelectedLabelsAsync(
                 IReadOnlyList<PrintSlotSelection> selections,
                 CancellationToken ct = default)
-                => Task.FromResult(new LabelPrintBatchResult { AllSucceeded = true });
+            {
+                lock (_callsLock)
+                {
+                    PrintSelectedLabelsCalls.Add(selections);
+                }
+
+                if (OnPrintSelectedLabelsAsync != null)
+                {
+                    return await OnPrintSelectedLabelsAsync(selections, ct).ConfigureAwait(false);
+                }
+
+                return new LabelPrintBatchResult { AllSucceeded = true };
+            }
 
             public byte[] GetLoadingPreviewPng(LabelTemplateType slot, LabelTemplateProfile profile)
                 => _validPngBytes;
@@ -3388,6 +3442,8 @@ namespace OpenBISLabelStudio.Tests
 
             public List<(LabelTemplateType Slot, LabelTemplateProfile Profile, string FreeText)> RenderedCalls { get; }
                 = new List<(LabelTemplateType, LabelTemplateProfile, string)>();
+            public List<(LabelTemplateType Slot, string EvaporationTemperature)> RenderedTemperatureCalls { get; }
+                = new List<(LabelTemplateType, string)>();
             public LabelTemplateProfile? LastPrintProfile { get; private set; }
             public SampleDetailsDto? LastPrintDetails { get; private set; }
             public IReadOnlyList<LabelPrintJobRequest>? LastPrintJobs { get; private set; }
@@ -3400,7 +3456,8 @@ namespace OpenBISLabelStudio.Tests
                 CancellationToken cancellationToken = default)
             {
                 RenderedCalls.Add((slot, profile, freeText));
-                return base.RenderTemplatePreviewPngAsync(slot, profile, details, freeText, cancellationToken);
+                RenderedTemperatureCalls.Add((slot, details?.EvaporationTemperature ?? ""));
+                return base.RenderTemplatePreviewPngAsync(slot, profile, details!, freeText, cancellationToken);
             }
 
             public override Task<LabelPrintBatchResult> PrintLabelsAsync(
@@ -4284,6 +4341,421 @@ namespace OpenBISLabelStudio.Tests
                 using Icon? exeIcon = Icon.ExtractAssociatedIcon(exePath);
                 AssertNotNull(exeIcon, $"Expected embedded Win32 application icon on '{exePath}'");
                 AssertTrue(exeIcon!.Width > 0 && exeIcon.Height > 0, "Executable icon dimensions must be positive");
+            }
+        }
+
+        private static void BackendMoleculeTemperatureOverrideIsolationAndPrintFlow()
+        {
+            static void AssertValidPngBytes(byte[] bytes, string context)
+            {
+                AssertTrue(bytes != null && bytes.Length > 8, $"{context}: PNG bytes must be non-empty");
+                AssertEqual((byte)0x89, bytes![0], $"{context}: PNG byte[0] mismatch");
+                AssertEqual((byte)0x50, bytes[1], $"{context}: PNG byte[1] mismatch");
+                AssertEqual((byte)0x4E, bytes[2], $"{context}: PNG byte[2] mismatch");
+                AssertEqual((byte)0x47, bytes[3], $"{context}: PNG byte[3] mismatch");
+            }
+
+            WithTempDir(tempRoot =>
+            {
+                var configService = new AppConfigService(tempRoot);
+                configService.SaveAppConfig(new AppConfig
+                {
+                    OpenBisUrl = "https://openbis.example.org",
+                    Token = "valid-tok"
+                });
+                configService.SaveConfiguredTypes(new[]
+                {
+                    new ConfiguredOpenBisType { Code = "SUBSTANCE", DisplayName = "Substance", TemplateProfile = LabelTemplateProfile.Molecule },
+                    new ConfiguredOpenBisType { Code = "SUBSTRATE", DisplayName = "Substrate", TemplateProfile = LabelTemplateProfile.Generic }
+                });
+                configService.SavePrinterConfig(AppConfigService.CreateDefaultPrinterConfig());
+
+                Directory.CreateDirectory(configService.TemplatesDirectoryPath);
+                foreach (LabelTemplateProfile profile in Enum.GetValues<LabelTemplateProfile>())
+                {
+                    foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
+                    {
+                        File.WriteAllText(configService.GetTemplateFilePath(slot, profile), "placeholder");
+                    }
+                }
+
+                string scriptPath = Path.Combine(tempRoot, "openbis_fetch.py");
+                File.WriteAllText(scriptPath,
+                    "import json, sys\n" +
+                    "if '--worker' in sys.argv[1:]:\n" +
+                    "    while True:\n" +
+                    "        line = sys.stdin.readline()\n" +
+                    "        if line == '':\n" +
+                    "            break\n" +
+                    "        if not line.strip():\n" +
+                    "            continue\n" +
+                    "        req = json.loads(line)\n" +
+                    "        action = req.get('action', '')\n" +
+                    "        if action == 'list':\n" +
+                    "            resp = {'success': True, 'data': []}\n" +
+                    "        elif action == 'details':\n" +
+                    "            perm_id = req.get('permId', '')\n" +
+                    "            if perm_id == 'PERM-MOL-T1':\n" +
+                    "                resp = {'success': True, 'details': {'permId': perm_id, 'sampleType': 'SUBSTANCE', 'name': '696a', 'evaporationTemperature': '250°C (1 A', 'evaporationTemperatureRaw': '250°C (1 A/min)'}}\n" +
+                    "            else:\n" +
+                    "                resp = {'success': True, 'details': {'permId': perm_id, 'sampleType': 'SUBSTRATE', 'name': 'Wafer-1', 'evaporationTemperature': ''}}\n" +
+                    "        else:\n" +
+                    "            resp = {'success': True, 'sessionActive': True}\n" +
+                    "        sys.stdout.write(json.dumps(resp) + '\\n')\n" +
+                    "        sys.stdout.flush()\n");
+
+                var client = new OpenBisClient(tempRoot);
+                var capturingRenderer = new CapturingLabelPreviewRenderer(
+                    configService,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                using var backend = new LabelStudioBackend(
+                    configService,
+                    client,
+                    capturingRenderer,
+                    () => new[] { "Brother PT-P700 (Installed)" });
+
+                // 1. Before sample load: temperature re-render returns empty dictionary cleanly.
+                IReadOnlyDictionary<LabelTemplateType, byte[]> beforeLoad = backend
+                    .RenderMoleculeEvaporationTemperatureAsync("300°C")
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(0, beforeLoad.Count, "Expected empty dictionary before any sample is loaded");
+
+                // 2. Load Molecule sample and verify extracted + raw temperatures surfaced on bundle.
+                SamplePreviewBundleDto molBundle = backend.LoadSamplePreviewsAsync("SUBSTANCE", "PERM-MOL-T1", "", "").GetAwaiter().GetResult();
+                AssertTrue(molBundle.Success, $"Molecule load failed: {molBundle.ErrorMessage}");
+                AssertEqual("250°C (1 A", molBundle.EvaporationTemperature, "Bundle EvaporationTemperature mismatch");
+                AssertEqual("250°C (1 A/min)", molBundle.EvaporationTemperatureRaw, "Bundle EvaporationTemperatureRaw mismatch");
+
+                // 3. Re-render Molecule temperature renders ONLY SmallBox12mm and Magnet12mm with cloned snapshot.
+                capturingRenderer.RenderedTemperatureCalls.Clear();
+                IReadOnlyDictionary<LabelTemplateType, byte[]> rerendered = backend
+                    .RenderMoleculeEvaporationTemperatureAsync("250°C")
+                    .GetAwaiter()
+                    .GetResult();
+                AssertEqual(2, rerendered.Count, "Expected exactly 2 Molecule temperature slots rendered");
+                AssertTrue(rerendered.ContainsKey(LabelTemplateType.SmallBox12mm), "Expected SmallBox12mm preview");
+                AssertTrue(rerendered.ContainsKey(LabelTemplateType.Magnet12mm), "Expected Magnet12mm preview");
+                AssertFalse(rerendered.ContainsKey(LabelTemplateType.Flask24mm), "Flask24mm must not be re-rendered for temperature");
+                AssertValidPngBytes(rerendered[LabelTemplateType.SmallBox12mm], "SmallBox temperature preview");
+                AssertValidPngBytes(rerendered[LabelTemplateType.Magnet12mm], "Magnet temperature preview");
+                AssertEqual(2, capturingRenderer.RenderedTemperatureCalls.Count, "Expected 2 renderer temperature calls");
+                foreach (var call in capturingRenderer.RenderedTemperatureCalls)
+                {
+                    AssertEqual("250°C", call.EvaporationTemperature, $"Slot {call.Slot} rendered wrong temperature");
+                }
+
+                // 4. Preview re-render did not mutate baseline sample; printing without override keeps openBIS value,
+                //    and printing with an override applies it cleanly.
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection { Slot = LabelTemplateType.SmallBox12mm, PrinterName = "Missing" }
+                }).GetAwaiter().GetResult();
+                AssertEqual("250°C (1 A", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "Preview re-render must not mutate baseline active sample temperature");
+
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Missing",
+                        EvaporationTemperature = "310°C"
+                    }
+                }).GetAwaiter().GetResult();
+                AssertEqual("310°C", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "PrintSelectedLabelsAsync must apply Molecule EvaporationTemperature override");
+
+                // 5. ClearActiveSample resets temperature state; Generic profile ignores temperature overrides.
+                backend.ClearActiveSample();
+                AssertEqual(0, backend.RenderMoleculeEvaporationTemperatureAsync("400°C").GetAwaiter().GetResult().Count,
+                    "Expected empty dictionary after ClearActiveSample");
+
+                SamplePreviewBundleDto genBundle = backend.LoadSamplePreviewsAsync("SUBSTRATE", "PERM-GEN-T1", "", "").GetAwaiter().GetResult();
+                AssertTrue(genBundle.Success, "Generic load should succeed");
+                capturingRenderer.RenderedTemperatureCalls.Clear();
+                AssertEqual(0, backend.RenderMoleculeEvaporationTemperatureAsync("400°C").GetAwaiter().GetResult().Count,
+                    "Generic profile must ignore RenderMoleculeEvaporationTemperatureAsync");
+                AssertEqual(0, capturingRenderer.RenderedTemperatureCalls.Count, "Generic profile must trigger 0 temperature renders");
+
+                backend.PrintSelectedLabelsAsync(new[]
+                {
+                    new PrintSlotSelection
+                    {
+                        Slot = LabelTemplateType.Magnet12mm,
+                        PrinterName = "Missing",
+                        FreeText = "Note",
+                        EvaporationTemperature = "400°C"
+                    }
+                }).GetAwaiter().GetResult();
+                AssertEqual("", capturingRenderer.LastPrintDetails!.EvaporationTemperature,
+                    "Generic profile print must not inject Molecule EvaporationTemperature override");
+            });
+        }
+
+        private static void Form1AdaptiveTemperatureAndFreeTextClickOutsideCommitBehavior()
+        {
+            byte[] validPng;
+            using (var bmp = new Bitmap(1, 1))
+            using (var ms = new MemoryStream())
+            {
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                validPng = ms.ToArray();
+            }
+
+            var stub = new StubLabelStudioBackend(validPng);
+            stub.OnLoadObjectsForTypeAsync = (typeCode, prompter, ct) =>
+            {
+                if (string.Equals(typeCode, "SUBSTANCE", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Task.FromResult(new SampleListResultDto
+                    {
+                        Success = true,
+                        Samples = new[]
+                        {
+                            new SampleSummaryDto { Name = "696a", PermId = "PERM-MOL-1", ModificationDate = "2026-11-23" },
+                            new SampleSummaryDto { Name = "24a", PermId = "PERM-MOL-2", ModificationDate = "2026-11-22" }
+                        }
+                    });
+                }
+
+                return Task.FromResult(new SampleListResultDto
+                {
+                    Success = true,
+                    Samples = new[]
+                    {
+                        new SampleSummaryDto { Name = "Wafer-1", PermId = "PERM-GEN-1", ModificationDate = "2026-11-20" }
+                    }
+                });
+            };
+            bool cancelNextLoad = false;
+            stub.OnLoadSamplePreviewsAsync = (typeCode, permId, magnetFt, flaskFt, onSlotReady, prompter, ct) =>
+            {
+                if (cancelNextLoad)
+                {
+                    return Task.FromResult(new SamplePreviewBundleDto
+                    {
+                        Success = false,
+                        WasCancelled = true,
+                        NoticeMessage = "Cancelled"
+                    });
+                }
+
+                bool isMolecule = string.Equals(typeCode, "SUBSTANCE", StringComparison.OrdinalIgnoreCase);
+                var slots = new Dictionary<LabelTemplateType, byte[]>
+                {
+                    [LabelTemplateType.SmallBox12mm] = validPng,
+                    [LabelTemplateType.Magnet12mm] = validPng,
+                    [LabelTemplateType.Flask24mm] = validPng
+                };
+                foreach (var kvp in slots)
+                {
+                    onSlotReady?.Invoke(kvp.Key, kvp.Value);
+                }
+
+                return Task.FromResult(new SamplePreviewBundleDto
+                {
+                    Success = true,
+                    Profile = isMolecule ? LabelTemplateProfile.Molecule : LabelTemplateProfile.Generic,
+                    SampleName = isMolecule ? "696a" : "Wafer-1",
+                    PermId = permId,
+                    EvaporationTemperature = isMolecule ? "250°C (1 A" : "",
+                    EvaporationTemperatureRaw = isMolecule ? "250°C (1 A/min)" : "",
+                    SlotPreviews = slots
+                });
+            };
+
+            using var form = new Form1(stub);
+            ShowOffscreen(form);
+
+            var cmbTypes = FindControl<ComboBox>(form, "openbisTypeComboBox");
+            var cmbObjects = FindControl<ComboBox>(form, "openbisObjectsComboBox");
+            var btnLoad = FindControl<Button>(form, "loadPrintTemplates");
+            var btnPrint = FindControl<Button>(form, "btnPrintLabel");
+
+            var lblBoxTemp = FindControl<Label>(form, "smallBoxEvapTempLabel");
+            var txtBoxTemp = FindControl<TextBox>(form, "smallBoxEvapTempBox");
+            var lblMagTemp = FindControl<Label>(form, "magnetEvapTempLabel");
+            var txtMagTemp = FindControl<TextBox>(form, "magnetEvapTempBox");
+            var lblMagFt = FindControl<Label>(form, "magnetFreeTextLabel");
+            var txtMagFt = FindControl<TextBox>(form, "magnetFreeTextBox");
+            var lblFlaskFt = FindControl<Label>(form, "flaskFreeTextLabel");
+            var txtFlaskFt = FindControl<TextBox>(form, "flaskFreeTextBox");
+            var picBox = FindControl<PictureBox>(form, "smallBoxLabelPreview");
+            var picMag = FindControl<PictureBox>(form, "magnetLabelPreview");
+            var picFlask = FindControl<PictureBox>(form, "flaskLabelPreview");
+
+            static void RaiseMouseDown(Control target)
+            {
+                MethodInfo? onMouseDown = typeof(Control).GetMethod(
+                    "OnMouseDown",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                AssertNotNull(onMouseDown, "Expected Control.OnMouseDown method");
+                onMouseDown!.Invoke(target, new object[] { new MouseEventArgs(MouseButtons.Left, 1, 5, 5, 0) });
+            }
+
+            static void FocusTextBoxForClickOutsideTest(Form owner, TextBox box)
+            {
+                owner.ActiveControl = box;
+                box.Focus();
+            }
+
+            // 1. Unselected type: all optional inputs & labels start hidden and disabled.
+            AssertFalse(lblBoxTemp.Visible || txtBoxTemp.Visible, "SmallBox Evap Temp controls must start hidden");
+            AssertFalse(lblMagTemp.Visible || txtMagTemp.Visible, "Magnet Evap Temp controls must start hidden");
+            AssertFalse(lblMagFt.Visible || txtMagFt.Visible, "Magnet Free Text controls must start hidden");
+            AssertFalse(lblFlaskFt.Visible || txtFlaskFt.Visible, "Flask Free Text controls must start hidden");
+
+            // 2. Select SUBSTANCE (Molecule): Evap Temp controls visible/enabled, Free Text controls (including Flask) hidden.
+            int subIdx = -1;
+            int genIdx = -1;
+            for (int i = 0; i < cmbTypes.Items.Count; i++)
+            {
+                if (cmbTypes.Items[i] is TypeOptionDto opt)
+                {
+                    if (opt.Code == "SUBSTANCE") subIdx = i;
+                    if (opt.Code == "SUBSTRATE") genIdx = i;
+                }
+            }
+            AssertTrue(subIdx > 0 && genIdx > 0, "Both SUBSTANCE and SUBSTRATE must exist in stub types");
+
+            cmbTypes.SelectedIndex = subIdx;
+            PumpEventsUntil(() => cmbObjects.Items.Count == 2, "Timed out loading SUBSTANCE objects");
+            AssertTrue(lblBoxTemp.Visible && txtBoxTemp.Visible && txtBoxTemp.Enabled, "Molecule must show SmallBox Evap Temp");
+            AssertTrue(lblMagTemp.Visible && txtMagTemp.Visible && txtMagTemp.Enabled, "Molecule must show Magnet Evap Temp");
+            AssertFalse(lblMagFt.Visible || txtMagFt.Visible || txtMagFt.Enabled, "Molecule must hide Magnet Free Text");
+            AssertFalse(lblFlaskFt.Visible || txtFlaskFt.Visible || txtFlaskFt.Enabled, "Molecule must hide Flask Free Text");
+
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 1 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out waiting for Molecule sample load & default temp");
+            AssertEqual("250°C (1 A", txtMagTemp.Text, "Magnet Evap Temp box must initialize in sync with SmallBox");
+
+            var tooltipField = typeof(Form1).GetField("_statusToolTip", BindingFlags.NonPublic | BindingFlags.Instance);
+            var tipControl = tooltipField?.GetValue(form) as ToolTip;
+            AssertNotNull(tipControl, "Expected _statusToolTip field on Form1");
+            AssertTrue((tipControl!.GetToolTip(txtBoxTemp) ?? "").Contains("trimmed to 10 chars", StringComparison.OrdinalIgnoreCase),
+                $"Expected truncated-value tooltip hint, actual: {tipControl.GetToolTip(txtBoxTemp)}");
+
+            // Switching to a second object in openbisObjectsComboBox without clicking Load clears loaded temp/previews.
+            cmbObjects.SelectedIndex = 1;
+            Application.DoEvents();
+            AssertEqual("", txtBoxTemp.Text, "Switching openbisObjectsComboBox to another sample must clear SmallBox Evap Temp");
+            AssertEqual("", txtMagTemp.Text, "Switching openbisObjectsComboBox to another sample must clear Magnet Evap Temp");
+
+            // Load Sample 2 cleanly, then verify a cancelled reload clears stale Sample 2 Evap Temp instead of keeping it.
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 2 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out loading second Molecule sample");
+            cancelNextLoad = true;
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 3 && lblBoxTemp.Visible,
+                "Timed out waiting for cancelled reload");
+            AssertEqual("", txtBoxTemp.Text, "Cancelled sample load must clear stale SmallBox Evap Temp");
+            AssertEqual("", txtMagTemp.Text, "Cancelled sample load must clear stale Magnet Evap Temp");
+            cancelNextLoad = false;
+
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 4 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out reloading Molecule sample after cancel");
+
+            // Typing syncs immediately without calling backend render until clicking outside.
+            FocusTextBoxForClickOutsideTest(form, txtBoxTemp);
+            txtBoxTemp.Text = "250°C";
+            AssertEqual("250°C", txtMagTemp.Text, "Editing SmallBox Evap Temp must sync Magnet Evap Temp");
+            AssertEqual(0, stub.RenderMoleculeEvaporationTemperatureCalls.Count,
+                "Typing in Evap Temp box must NOT render until clicking outside");
+
+            // Clicking non-selectable PictureBox outside commits once; clicking again unchanged does nothing.
+            RaiseMouseDown(picBox);
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 1,
+                "Clicking outside Evap Temp onto PictureBox must trigger re-render");
+            AssertEqual("250°C", stub.RenderMoleculeEvaporationTemperatureCalls[0], "Committed temperature mismatch");
+
+            FocusTextBoxForClickOutsideTest(form, txtBoxTemp);
+            RaiseMouseDown(form);
+            Application.DoEvents();
+            AssertEqual(1, stub.RenderMoleculeEvaporationTemperatureCalls.Count,
+                "Clicking outside without modifying text must not trigger duplicate render");
+
+            // Editing Magnet box syncs to SmallBox, renders on click outside, and Print sends override.
+            FocusTextBoxForClickOutsideTest(form, txtMagTemp);
+            txtMagTemp.Text = "260°C";
+            AssertEqual("260°C", txtBoxTemp.Text, "Editing Magnet Evap Temp must sync SmallBox Evap Temp");
+            AssertEqual(1, stub.RenderMoleculeEvaporationTemperatureCalls.Count,
+                "Typing in Magnet Evap Temp must NOT render until clicking outside");
+
+            RaiseMouseDown(picMag);
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 2,
+                "Clicking outside Magnet Evap Temp onto PictureBox must trigger re-render");
+            AssertEqual("260°C", stub.RenderMoleculeEvaporationTemperatureCalls[1], "Committed Magnet temperature mismatch");
+
+            // 3. Switch to SUBSTRATE (Generic): hides Evap Temp, shows Free Text; Flask renders only on click outside.
+            cmbTypes.SelectedIndex = genIdx;
+            PumpEventsUntil(() => cmbObjects.Items.Count == 1, "Timed out loading SUBSTRATE objects");
+            AssertFalse(lblBoxTemp.Visible || txtBoxTemp.Visible || txtBoxTemp.Enabled, "Generic must hide SmallBox Evap Temp");
+            AssertFalse(lblMagTemp.Visible || txtMagTemp.Visible || txtMagTemp.Enabled, "Generic must hide Magnet Evap Temp");
+            AssertTrue(lblMagFt.Visible && txtMagFt.Visible && txtMagFt.Enabled, "Generic must show Magnet Free Text");
+            AssertTrue(lblFlaskFt.Visible && txtFlaskFt.Visible && txtFlaskFt.Enabled, "Generic must show Flask Free Text");
+
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 5, "Timed out loading Generic sample");
+
+            FocusTextBoxForClickOutsideTest(form, txtFlaskFt);
+            txtFlaskFt.Text = "Custom Flask";
+            AssertEqual(0, stub.RenderSlotWithFreeTextCalls.Count, "Typing in Free Text must NOT render until clicking outside");
+
+            RaiseMouseDown(picFlask);
+            PumpEventsUntil(() => stub.RenderSlotWithFreeTextCalls.Count == 1,
+                "Clicking outside Free Text onto PictureBox must trigger re-render");
+            AssertEqual(LabelTemplateType.Flask24mm, stub.RenderSlotWithFreeTextCalls[0].Slot, "Flask slot mismatch");
+            AssertEqual("Custom Flask", stub.RenderSlotWithFreeTextCalls[0].FreeText, "Flask Free Text payload mismatch");
+
+            FocusTextBoxForClickOutsideTest(form, txtFlaskFt);
+            RaiseMouseDown(form);
+            Application.DoEvents();
+            AssertEqual(1, stub.RenderSlotWithFreeTextCalls.Count,
+                "Clicking outside Free Text without text changes must not re-render");
+
+            // 4. Switch back to SUBSTANCE and verify Enter key commit + Print override.
+            cmbTypes.SelectedIndex = subIdx;
+            PumpEventsUntil(() => cmbObjects.Items.Count == 2, "Timed out reloading SUBSTANCE objects");
+            btnLoad.PerformClick();
+            PumpEventsUntil(() => stub.LoadSamplePreviewsCalls.Count == 6 && txtBoxTemp.Text == "250°C (1 A",
+                "Timed out reloading Molecule sample before Enter/print test");
+
+            FocusTextBoxForClickOutsideTest(form, txtBoxTemp);
+            txtBoxTemp.Text = "255°C";
+            MethodInfo? boxKeyDown = typeof(Form1).GetMethod(
+                "smallBoxEvapTempBox_KeyDown",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            AssertNotNull(boxKeyDown, "Expected smallBoxEvapTempBox_KeyDown handler on Form1");
+            boxKeyDown!.Invoke(form, new object[] { txtBoxTemp, new KeyEventArgs(Keys.Enter) });
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 3,
+                "Pressing Enter in Evap Temp box must trigger Molecule re-render");
+            AssertEqual("255°C", stub.RenderMoleculeEvaporationTemperatureCalls[2], "Enter commit temperature mismatch");
+
+            FocusTextBoxForClickOutsideTest(form, txtMagTemp);
+            txtMagTemp.Text = "260°C";
+            RaiseMouseDown(picMag);
+            PumpEventsUntil(() => stub.RenderMoleculeEvaporationTemperatureCalls.Count == 4,
+                "Expected Molecule temperature re-render before Print");
+
+            var printRelease = new TaskCompletionSource<LabelPrintBatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            stub.OnPrintSelectedLabelsAsync = (_, _) => printRelease.Task;
+            try
+            {
+                btnPrint.PerformClick();
+                PumpEventsUntil(() => stub.PrintSelectedLabelsCalls.Count == 1,
+                    "Print click must send Molecule selections to backend");
+                AssertEqual("260°C", stub.PrintSelectedLabelsCalls[0][0].EvaporationTemperature,
+                    "Print selection must carry synced Molecule EvaporationTemperature override");
+            }
+            finally
+            {
+                form.Dispose();
+                printRelease.TrySetResult(new LabelPrintBatchResult { AllSucceeded = true });
             }
         }
 

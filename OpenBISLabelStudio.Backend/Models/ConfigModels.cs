@@ -224,6 +224,9 @@ namespace OpenBISLabelStudio.Models
         [JsonProperty("evaporationTemperature")]
         public string EvaporationTemperature { get; set; } = "";
 
+        [JsonProperty("evaporationTemperatureRaw")]
+        public string EvaporationTemperatureRaw { get; set; } = "";
+
         [JsonProperty("specialStorageConditions")]
         public List<string> SpecialStorageConditions { get; set; } = new List<string>();
 

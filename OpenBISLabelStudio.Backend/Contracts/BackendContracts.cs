@@ -76,6 +76,10 @@ namespace OpenBISLabelStudio.Backend.Contracts
             string freeText,
             CancellationToken ct = default);
 
+        Task<IReadOnlyDictionary<LabelTemplateType, byte[]>> RenderMoleculeEvaporationTemperatureAsync(
+            string evaporationTemperature,
+            CancellationToken ct = default);
+
         Task<OperationResult> UpdatePrinterSelectionsAsync(
             string smallBoxPrinter,
             string magnetPrinter,
@@ -307,6 +311,8 @@ namespace OpenBISLabelStudio.Backend.Contracts
         public bool IsGenericProfile => Profile == LabelTemplateProfile.Generic;
         public string SampleName { get; set; } = "";
         public string PermId { get; set; } = "";
+        public string EvaporationTemperature { get; set; } = "";
+        public string EvaporationTemperatureRaw { get; set; } = "";
         public string NoticeMessage { get; set; } = "";
         public string NoticeTooltip { get; set; } = "";
         public string ErrorMessage { get; set; } = "";
@@ -322,5 +328,6 @@ namespace OpenBISLabelStudio.Backend.Contracts
         public LabelTemplateType Slot { get; set; }
         public string PrinterName { get; set; } = "";
         public string FreeText { get; set; } = "";
+        public string? EvaporationTemperature { get; set; }
     }
 }

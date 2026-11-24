@@ -49,11 +49,15 @@ namespace OpenBISLabelStudio
             smallBoxLabelGroupBox = new GroupBox();
             smallBoxPrinterComboBox = new ComboBox();
             smallBoxPrinterLabel = new Label();
+            smallBoxEvapTempBox = new TextBox();
+            smallBoxEvapTempLabel = new Label();
             smallBoxLabelCheckBox = new CheckBox();
             smallBoxLabelPreview = new PictureBox();
             magnetLabelGroupBox = new GroupBox();
             magnetPrinterComboBox = new ComboBox();
             magnetPrinterLabel = new Label();
+            magnetEvapTempBox = new TextBox();
+            magnetEvapTempLabel = new Label();
             magnetFreeTextBox = new TextBox();
             magnetFreeTextLabel = new Label();
             magnetLabelCheckBox = new CheckBox();
@@ -109,6 +113,7 @@ namespace OpenBISLabelStudio
             openbisObjectsComboBox.Name = "openbisObjectsComboBox";
             openbisObjectsComboBox.Size = new Size(605, 28);
             openbisObjectsComboBox.TabIndex = 3;
+            openbisObjectsComboBox.SelectedIndexChanged += openbisObjectsComboBox_SelectedIndexChanged;
             // 
             // sortByLabel
             // 
@@ -195,6 +200,8 @@ namespace OpenBISLabelStudio
             // 
             smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterComboBox);
             smallBoxLabelGroupBox.Controls.Add(smallBoxPrinterLabel);
+            smallBoxLabelGroupBox.Controls.Add(smallBoxEvapTempBox);
+            smallBoxLabelGroupBox.Controls.Add(smallBoxEvapTempLabel);
             smallBoxLabelGroupBox.Controls.Add(smallBoxLabelCheckBox);
             smallBoxLabelGroupBox.Controls.Add(smallBoxLabelPreview);
             smallBoxLabelGroupBox.Location = new Point(40, 116);
@@ -212,7 +219,7 @@ namespace OpenBISLabelStudio
             smallBoxPrinterComboBox.Location = new Point(15, 275);
             smallBoxPrinterComboBox.Name = "smallBoxPrinterComboBox";
             smallBoxPrinterComboBox.Size = new Size(270, 28);
-            smallBoxPrinterComboBox.TabIndex = 3;
+            smallBoxPrinterComboBox.TabIndex = 5;
             smallBoxPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // smallBoxPrinterLabel
@@ -221,8 +228,27 @@ namespace OpenBISLabelStudio
             smallBoxPrinterLabel.Location = new Point(15, 250);
             smallBoxPrinterLabel.Name = "smallBoxPrinterLabel";
             smallBoxPrinterLabel.Size = new Size(55, 20);
-            smallBoxPrinterLabel.TabIndex = 2;
+            smallBoxPrinterLabel.TabIndex = 4;
             smallBoxPrinterLabel.Text = "Printer:";
+            // 
+            // smallBoxEvapTempBox
+            // 
+            smallBoxEvapTempBox.Location = new Point(15, 195);
+            smallBoxEvapTempBox.Name = "smallBoxEvapTempBox";
+            smallBoxEvapTempBox.Size = new Size(270, 27);
+            smallBoxEvapTempBox.TabIndex = 3;
+            smallBoxEvapTempBox.TextChanged += smallBoxEvapTempBox_TextChanged;
+            smallBoxEvapTempBox.Leave += smallBoxEvapTempBox_Leave;
+            smallBoxEvapTempBox.KeyDown += smallBoxEvapTempBox_KeyDown;
+            // 
+            // smallBoxEvapTempLabel
+            // 
+            smallBoxEvapTempLabel.AutoSize = true;
+            smallBoxEvapTempLabel.Location = new Point(15, 170);
+            smallBoxEvapTempLabel.Name = "smallBoxEvapTempLabel";
+            smallBoxEvapTempLabel.Size = new Size(131, 20);
+            smallBoxEvapTempLabel.TabIndex = 2;
+            smallBoxEvapTempLabel.Text = "Evaporation Temp:";
             // 
             // smallBoxLabelCheckBox
             // 
@@ -247,6 +273,8 @@ namespace OpenBISLabelStudio
             // 
             magnetLabelGroupBox.Controls.Add(magnetPrinterComboBox);
             magnetLabelGroupBox.Controls.Add(magnetPrinterLabel);
+            magnetLabelGroupBox.Controls.Add(magnetEvapTempBox);
+            magnetLabelGroupBox.Controls.Add(magnetEvapTempLabel);
             magnetLabelGroupBox.Controls.Add(magnetFreeTextBox);
             magnetLabelGroupBox.Controls.Add(magnetFreeTextLabel);
             magnetLabelGroupBox.Controls.Add(magnetLabelCheckBox);
@@ -276,6 +304,25 @@ namespace OpenBISLabelStudio
             magnetPrinterLabel.Size = new Size(55, 20);
             magnetPrinterLabel.TabIndex = 4;
             magnetPrinterLabel.Text = "Printer:";
+            // 
+            // magnetEvapTempBox
+            // 
+            magnetEvapTempBox.Location = new Point(15, 195);
+            magnetEvapTempBox.Name = "magnetEvapTempBox";
+            magnetEvapTempBox.Size = new Size(300, 27);
+            magnetEvapTempBox.TabIndex = 3;
+            magnetEvapTempBox.TextChanged += magnetEvapTempBox_TextChanged;
+            magnetEvapTempBox.Leave += magnetEvapTempBox_Leave;
+            magnetEvapTempBox.KeyDown += magnetEvapTempBox_KeyDown;
+            // 
+            // magnetEvapTempLabel
+            // 
+            magnetEvapTempLabel.AutoSize = true;
+            magnetEvapTempLabel.Location = new Point(15, 170);
+            magnetEvapTempLabel.Name = "magnetEvapTempLabel";
+            magnetEvapTempLabel.Size = new Size(131, 20);
+            magnetEvapTempLabel.TabIndex = 2;
+            magnetEvapTempLabel.Text = "Evaporation Temp:";
             // 
             // magnetFreeTextBox
             // 
@@ -441,9 +488,13 @@ namespace OpenBISLabelStudio
         private CheckBox smallBoxLabelCheckBox;
         private Label smallBoxPrinterLabel;
         private ComboBox smallBoxPrinterComboBox;
+        private Label smallBoxEvapTempLabel;
+        private TextBox smallBoxEvapTempBox;
         private GroupBox magnetLabelGroupBox;
         private PictureBox magnetLabelPreview;
         private CheckBox magnetLabelCheckBox;
+        private Label magnetEvapTempLabel;
+        private TextBox magnetEvapTempBox;
         private Label magnetFreeTextLabel;
         private TextBox magnetFreeTextBox;
         private Label magnetPrinterLabel;
