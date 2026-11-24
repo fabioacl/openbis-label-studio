@@ -436,7 +436,7 @@ namespace OpenBISLabelStudio
             // 
             // lblConnectionStatus
             // 
-            lblConnectionStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            lblConnectionStatus.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             lblConnectionStatus.Location = new Point(36, 330);
             lblConnectionStatus.Name = "lblConnectionStatus";
             lblConnectionStatus.Size = new Size(868, 120);
@@ -517,7 +517,7 @@ namespace OpenBISLabelStudio
             // 
             dgvObjectTypes.AllowUserToAddRows = false;
             dgvObjectTypes.AllowUserToDeleteRows = false;
-            dgvObjectTypes.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            dgvObjectTypes.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             dgvObjectTypes.BackgroundColor = SystemColors.Window;
             dgvObjectTypes.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             dgvObjectTypes.Columns.AddRange(new DataGridViewColumn[] { colUse, colType, colStyle });
@@ -561,7 +561,7 @@ namespace OpenBISLabelStudio
             // 
             // grpExamplePreviews
             // 
-            grpExamplePreviews.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            grpExamplePreviews.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             grpExamplePreviews.Controls.Add(btnPreviewMolecule);
             grpExamplePreviews.Controls.Add(btnPreviewGeneric);
             grpExamplePreviews.Controls.Add(lblPreviewActiveHint);

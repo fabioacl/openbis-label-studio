@@ -88,6 +88,7 @@ namespace OpenBISLabelStudio
             // 
             // openbisTypeComboBox
             // 
+            openbisTypeComboBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             openbisTypeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             openbisTypeComboBox.FormattingEnabled = true;
             openbisTypeComboBox.Location = new Point(165, 22);
@@ -107,6 +108,7 @@ namespace OpenBISLabelStudio
             // 
             // openbisObjectsComboBox
             // 
+            openbisObjectsComboBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             openbisObjectsComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             openbisObjectsComboBox.FormattingEnabled = true;
             openbisObjectsComboBox.Location = new Point(165, 62);
@@ -117,6 +119,7 @@ namespace OpenBISLabelStudio
             // 
             // sortByLabel
             // 
+            sortByLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             sortByLabel.AutoSize = true;
             sortByLabel.Location = new Point(782, 65);
             sortByLabel.Name = "sortByLabel";
@@ -126,6 +129,7 @@ namespace OpenBISLabelStudio
             // 
             // sortByComboBox
             // 
+            sortByComboBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             sortByComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             sortByComboBox.FormattingEnabled = true;
             sortByComboBox.Location = new Point(828, 62);
@@ -137,6 +141,7 @@ namespace OpenBISLabelStudio
             // btnSortDirection
             // 
             btnSortDirection.AccessibleName = "Sort Direction";
+            btnSortDirection.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnSortDirection.Location = new Point(1002, 62);
             btnSortDirection.Name = "btnSortDirection";
             btnSortDirection.Size = new Size(38, 28);
@@ -147,6 +152,7 @@ namespace OpenBISLabelStudio
             // 
             // lblStatusNotice
             // 
+            lblStatusNotice.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             lblStatusNotice.AutoEllipsis = true;
             lblStatusNotice.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
             lblStatusNotice.ForeColor = Color.FromArgb(180, 83, 9);
@@ -158,6 +164,7 @@ namespace OpenBISLabelStudio
             // 
             // prgLoading
             // 
+            prgLoading.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             prgLoading.Location = new Point(860, 95);
             prgLoading.MarqueeAnimationSpeed = 25;
             prgLoading.Name = "prgLoading";
@@ -206,7 +213,7 @@ namespace OpenBISLabelStudio
             smallBoxLabelGroupBox.Controls.Add(smallBoxLabelPreview);
             smallBoxLabelGroupBox.Location = new Point(40, 116);
             smallBoxLabelGroupBox.Name = "smallBoxLabelGroupBox";
-            smallBoxLabelGroupBox.Size = new Size(300, 326);
+            smallBoxLabelGroupBox.Size = new Size(317, 326);
             smallBoxLabelGroupBox.TabIndex = 7;
             smallBoxLabelGroupBox.TabStop = false;
             smallBoxLabelGroupBox.Text = "Small Box 12mm Label";
@@ -214,16 +221,18 @@ namespace OpenBISLabelStudio
             // 
             // smallBoxPrinterComboBox
             // 
+            smallBoxPrinterComboBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             smallBoxPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             smallBoxPrinterComboBox.FormattingEnabled = true;
             smallBoxPrinterComboBox.Location = new Point(15, 275);
             smallBoxPrinterComboBox.Name = "smallBoxPrinterComboBox";
-            smallBoxPrinterComboBox.Size = new Size(270, 28);
+            smallBoxPrinterComboBox.Size = new Size(287, 28);
             smallBoxPrinterComboBox.TabIndex = 5;
             smallBoxPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // smallBoxPrinterLabel
             // 
+            smallBoxPrinterLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             smallBoxPrinterLabel.AutoSize = true;
             smallBoxPrinterLabel.Location = new Point(15, 250);
             smallBoxPrinterLabel.Name = "smallBoxPrinterLabel";
@@ -233,9 +242,10 @@ namespace OpenBISLabelStudio
             // 
             // smallBoxEvapTempBox
             // 
+            smallBoxEvapTempBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             smallBoxEvapTempBox.Location = new Point(15, 195);
             smallBoxEvapTempBox.Name = "smallBoxEvapTempBox";
-            smallBoxEvapTempBox.Size = new Size(270, 27);
+            smallBoxEvapTempBox.Size = new Size(287, 27);
             smallBoxEvapTempBox.TabIndex = 3;
             smallBoxEvapTempBox.TextChanged += smallBoxEvapTempBox_TextChanged;
             smallBoxEvapTempBox.Leave += smallBoxEvapTempBox_Leave;
@@ -243,6 +253,7 @@ namespace OpenBISLabelStudio
             // 
             // smallBoxEvapTempLabel
             // 
+            smallBoxEvapTempLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             smallBoxEvapTempLabel.AutoSize = true;
             smallBoxEvapTempLabel.Location = new Point(15, 170);
             smallBoxEvapTempLabel.Name = "smallBoxEvapTempLabel";
@@ -252,8 +263,9 @@ namespace OpenBISLabelStudio
             // 
             // smallBoxLabelCheckBox
             // 
+            smallBoxLabelCheckBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             smallBoxLabelCheckBox.AutoSize = true;
-            smallBoxLabelCheckBox.Location = new Point(270, 15);
+            smallBoxLabelCheckBox.Location = new Point(287, 15);
             smallBoxLabelCheckBox.Name = "smallBoxLabelCheckBox";
             smallBoxLabelCheckBox.Size = new Size(15, 14);
             smallBoxLabelCheckBox.TabIndex = 1;
@@ -261,10 +273,11 @@ namespace OpenBISLabelStudio
             // 
             // smallBoxLabelPreview
             // 
+            smallBoxLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             smallBoxLabelPreview.BorderStyle = BorderStyle.FixedSingle;
-            smallBoxLabelPreview.Location = new Point(15, 45);
+            smallBoxLabelPreview.Location = new Point(15, 40);
             smallBoxLabelPreview.Name = "smallBoxLabelPreview";
-            smallBoxLabelPreview.Size = new Size(270, 110);
+            smallBoxLabelPreview.Size = new Size(287, 118);
             smallBoxLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
             smallBoxLabelPreview.TabIndex = 0;
             smallBoxLabelPreview.TabStop = false;
@@ -279,25 +292,27 @@ namespace OpenBISLabelStudio
             magnetLabelGroupBox.Controls.Add(magnetFreeTextLabel);
             magnetLabelGroupBox.Controls.Add(magnetLabelCheckBox);
             magnetLabelGroupBox.Controls.Add(magnetLabelPreview);
-            magnetLabelGroupBox.Location = new Point(365, 116);
+            magnetLabelGroupBox.Location = new Point(382, 116);
             magnetLabelGroupBox.Name = "magnetLabelGroupBox";
-            magnetLabelGroupBox.Size = new Size(330, 326);
+            magnetLabelGroupBox.Size = new Size(316, 326);
             magnetLabelGroupBox.TabIndex = 8;
             magnetLabelGroupBox.TabStop = false;
             magnetLabelGroupBox.Text = "Magnet 12mm Label";
             // 
             // magnetPrinterComboBox
             // 
+            magnetPrinterComboBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             magnetPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             magnetPrinterComboBox.FormattingEnabled = true;
             magnetPrinterComboBox.Location = new Point(15, 275);
             magnetPrinterComboBox.Name = "magnetPrinterComboBox";
-            magnetPrinterComboBox.Size = new Size(300, 28);
+            magnetPrinterComboBox.Size = new Size(286, 28);
             magnetPrinterComboBox.TabIndex = 5;
             magnetPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // magnetPrinterLabel
             // 
+            magnetPrinterLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             magnetPrinterLabel.AutoSize = true;
             magnetPrinterLabel.Location = new Point(15, 250);
             magnetPrinterLabel.Name = "magnetPrinterLabel";
@@ -307,9 +322,10 @@ namespace OpenBISLabelStudio
             // 
             // magnetEvapTempBox
             // 
+            magnetEvapTempBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             magnetEvapTempBox.Location = new Point(15, 195);
             magnetEvapTempBox.Name = "magnetEvapTempBox";
-            magnetEvapTempBox.Size = new Size(300, 27);
+            magnetEvapTempBox.Size = new Size(286, 27);
             magnetEvapTempBox.TabIndex = 3;
             magnetEvapTempBox.TextChanged += magnetEvapTempBox_TextChanged;
             magnetEvapTempBox.Leave += magnetEvapTempBox_Leave;
@@ -317,6 +333,7 @@ namespace OpenBISLabelStudio
             // 
             // magnetEvapTempLabel
             // 
+            magnetEvapTempLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             magnetEvapTempLabel.AutoSize = true;
             magnetEvapTempLabel.Location = new Point(15, 170);
             magnetEvapTempLabel.Name = "magnetEvapTempLabel";
@@ -326,15 +343,17 @@ namespace OpenBISLabelStudio
             // 
             // magnetFreeTextBox
             // 
+            magnetFreeTextBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             magnetFreeTextBox.Location = new Point(15, 195);
             magnetFreeTextBox.Name = "magnetFreeTextBox";
-            magnetFreeTextBox.Size = new Size(300, 27);
+            magnetFreeTextBox.Size = new Size(286, 27);
             magnetFreeTextBox.TabIndex = 3;
             magnetFreeTextBox.Leave += magnetFreeTextBox_Leave;
             magnetFreeTextBox.KeyDown += magnetFreeTextBox_KeyDown;
             // 
             // magnetFreeTextLabel
             // 
+            magnetFreeTextLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             magnetFreeTextLabel.AutoSize = true;
             magnetFreeTextLabel.Location = new Point(15, 170);
             magnetFreeTextLabel.Name = "magnetFreeTextLabel";
@@ -344,8 +363,9 @@ namespace OpenBISLabelStudio
             // 
             // magnetLabelCheckBox
             // 
+            magnetLabelCheckBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             magnetLabelCheckBox.AutoSize = true;
-            magnetLabelCheckBox.Location = new Point(300, 15);
+            magnetLabelCheckBox.Location = new Point(286, 15);
             magnetLabelCheckBox.Name = "magnetLabelCheckBox";
             magnetLabelCheckBox.Size = new Size(15, 14);
             magnetLabelCheckBox.TabIndex = 1;
@@ -353,10 +373,11 @@ namespace OpenBISLabelStudio
             // 
             // magnetLabelPreview
             // 
+            magnetLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             magnetLabelPreview.BorderStyle = BorderStyle.FixedSingle;
-            magnetLabelPreview.Location = new Point(15, 45);
+            magnetLabelPreview.Location = new Point(15, 40);
             magnetLabelPreview.Name = "magnetLabelPreview";
-            magnetLabelPreview.Size = new Size(300, 110);
+            magnetLabelPreview.Size = new Size(286, 118);
             magnetLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
             magnetLabelPreview.TabIndex = 0;
             magnetLabelPreview.TabStop = false;
@@ -369,25 +390,27 @@ namespace OpenBISLabelStudio
             flaskLabelGroupBox.Controls.Add(flaskFreeTextLabel);
             flaskLabelGroupBox.Controls.Add(flaskLabelCheckBox);
             flaskLabelGroupBox.Controls.Add(flaskLabelPreview);
-            flaskLabelGroupBox.Location = new Point(720, 116);
+            flaskLabelGroupBox.Location = new Point(723, 116);
             flaskLabelGroupBox.Name = "flaskLabelGroupBox";
-            flaskLabelGroupBox.Size = new Size(320, 326);
+            flaskLabelGroupBox.Size = new Size(317, 326);
             flaskLabelGroupBox.TabIndex = 9;
             flaskLabelGroupBox.TabStop = false;
             flaskLabelGroupBox.Text = "Flask 24mm Label";
             // 
             // flaskPrinterComboBox
             // 
+            flaskPrinterComboBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             flaskPrinterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             flaskPrinterComboBox.FormattingEnabled = true;
             flaskPrinterComboBox.Location = new Point(15, 275);
             flaskPrinterComboBox.Name = "flaskPrinterComboBox";
-            flaskPrinterComboBox.Size = new Size(290, 28);
+            flaskPrinterComboBox.Size = new Size(287, 28);
             flaskPrinterComboBox.TabIndex = 5;
             flaskPrinterComboBox.SelectedIndexChanged += PrinterComboBox_SelectedIndexChanged;
             // 
             // flaskPrinterLabel
             // 
+            flaskPrinterLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             flaskPrinterLabel.AutoSize = true;
             flaskPrinterLabel.Location = new Point(15, 250);
             flaskPrinterLabel.Name = "flaskPrinterLabel";
@@ -397,15 +420,17 @@ namespace OpenBISLabelStudio
             // 
             // flaskFreeTextBox
             // 
+            flaskFreeTextBox.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             flaskFreeTextBox.Location = new Point(15, 195);
             flaskFreeTextBox.Name = "flaskFreeTextBox";
-            flaskFreeTextBox.Size = new Size(290, 27);
+            flaskFreeTextBox.Size = new Size(287, 27);
             flaskFreeTextBox.TabIndex = 3;
             flaskFreeTextBox.Leave += flaskFreeTextBox_Leave;
             flaskFreeTextBox.KeyDown += flaskFreeTextBox_KeyDown;
             // 
             // flaskFreeTextLabel
             // 
+            flaskFreeTextLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             flaskFreeTextLabel.AutoSize = true;
             flaskFreeTextLabel.Location = new Point(15, 170);
             flaskFreeTextLabel.Name = "flaskFreeTextLabel";
@@ -415,8 +440,9 @@ namespace OpenBISLabelStudio
             // 
             // flaskLabelCheckBox
             // 
+            flaskLabelCheckBox.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             flaskLabelCheckBox.AutoSize = true;
-            flaskLabelCheckBox.Location = new Point(290, 15);
+            flaskLabelCheckBox.Location = new Point(287, 15);
             flaskLabelCheckBox.Name = "flaskLabelCheckBox";
             flaskLabelCheckBox.Size = new Size(15, 14);
             flaskLabelCheckBox.TabIndex = 1;
@@ -424,10 +450,11 @@ namespace OpenBISLabelStudio
             // 
             // flaskLabelPreview
             // 
+            flaskLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             flaskLabelPreview.BorderStyle = BorderStyle.FixedSingle;
-            flaskLabelPreview.Location = new Point(15, 30);
+            flaskLabelPreview.Location = new Point(15, 40);
             flaskLabelPreview.Name = "flaskLabelPreview";
-            flaskLabelPreview.Size = new Size(290, 135);
+            flaskLabelPreview.Size = new Size(287, 118);
             flaskLabelPreview.SizeMode = PictureBoxSizeMode.Zoom;
             flaskLabelPreview.TabIndex = 0;
             flaskLabelPreview.TabStop = false;

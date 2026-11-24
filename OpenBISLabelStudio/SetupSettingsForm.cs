@@ -63,6 +63,18 @@ namespace OpenBISLabelStudio
         private string _fallbackMagnetPrinter = "Brother PT-P700 (Kopie 1)";
         private string _fallbackFlaskPrinter = "Brother PT-P700 (Kopie 2)";
         private Icon? _windowIcon;
+        private bool _hasLayoutBaseline;
+        private bool _isApplyingResponsiveLayout;
+        private int _initialDpi = 96;
+        private int _baseGridHeight = 230;
+        private int _basePreviewsHeight = 224;
+        private int _baseGridToPreviewsGap = 10;
+        private int _basePreviewsBottomMargin = 14;
+        private int _basePreviewColumnMargin = 16;
+        private int _basePreviewColumnGap = 19;
+        private int _basePreviewTitleTop = 64;
+        private int _basePreviewBoxTop = 84;
+        private int _basePreviewBoxBottomMargin = 16;
 
         /// <summary>
         /// Initializes the unified setup and settings dialog for the specified <paramref name="mode"/>.
@@ -78,8 +90,11 @@ namespace OpenBISLabelStudio
             _initialWarning = initialWarning;
 
             InitializeComponent();
+            DoubleBuffered = true;
+            CaptureBaselineLayoutMetrics();
             AppIconProvider.AttachWindowIcon(this, ref _windowIcon);
             InitializeFromConfig(startStep);
+            UpdateResponsiveLayout();
         }
 
         /// <summary>
@@ -170,11 +185,103 @@ namespace OpenBISLabelStudio
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
+            UpdateResponsiveLayout();
             _backend.WarmUpInBackground();
 
             if (_currentStep == SetupWizardStep.ObjectTypes && !_hasStartedPage2Previews)
             {
                 ShowExamplePreviews(_activePreviewProfile);
+            }
+        }
+
+        protected override void OnLayout(LayoutEventArgs levent)
+        {
+            base.OnLayout(levent);
+            UpdateResponsiveLayout();
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+            UpdateResponsiveLayout();
+        }
+
+        private void CaptureBaselineLayoutMetrics()
+        {
+            _initialDpi = Math.Max(96, DeviceDpi);
+            _baseGridHeight = Math.Max(120, dgvObjectTypes.Height);
+            _basePreviewsHeight = Math.Max(140, grpExamplePreviews.Height);
+            _baseGridToPreviewsGap = Math.Max(4, grpExamplePreviews.Top - dgvObjectTypes.Bottom);
+            _basePreviewsBottomMargin = Math.Max(4, pnlObjectTypes.ClientSize.Height - grpExamplePreviews.Bottom);
+            _basePreviewColumnMargin = Math.Max(8, picPreviewSmallBox.Left);
+            _basePreviewColumnGap = Math.Max(8, picPreviewMagnet.Left - picPreviewSmallBox.Right);
+            _basePreviewTitleTop = lblPreviewSmallBoxTitle.Top;
+            _basePreviewBoxTop = picPreviewSmallBox.Top;
+            _basePreviewBoxBottomMargin = Math.Max(8, grpExamplePreviews.ClientSize.Height - picPreviewSmallBox.Bottom);
+            _hasLayoutBaseline = true;
+        }
+
+        private void UpdateResponsiveLayout()
+        {
+            if (!_hasLayoutBaseline || _isApplyingResponsiveLayout || IsDisposed)
+            {
+                return;
+            }
+
+            if (WindowState == FormWindowState.Minimized || pnlObjectTypes.ClientSize.Width <= 0 || pnlObjectTypes.ClientSize.Height <= 0)
+            {
+                return;
+            }
+
+            double dpiRatio = (double)Math.Max(96, DeviceDpi) / _initialDpi;
+            int gridToPreviewsGap = Math.Max(4, (int)Math.Round(_baseGridToPreviewsGap * dpiRatio));
+            int previewsBottomMargin = Math.Max(4, (int)Math.Round(_basePreviewsBottomMargin * dpiRatio));
+            int colMargin = Math.Max(8, (int)Math.Round(_basePreviewColumnMargin * dpiRatio));
+            int colGap = Math.Max(8, (int)Math.Round(_basePreviewColumnGap * dpiRatio));
+            int titleTop = (int)Math.Round(_basePreviewTitleTop * dpiRatio);
+            int boxTop = (int)Math.Round(_basePreviewBoxTop * dpiRatio);
+            int boxBottomMargin = Math.Max(8, (int)Math.Round(_basePreviewBoxBottomMargin * dpiRatio));
+            int baseGridH = (int)Math.Round(_baseGridHeight * dpiRatio);
+            int basePreviewsH = (int)Math.Round(_basePreviewsHeight * dpiRatio);
+            int minGridH = Math.Max(120, (int)Math.Round(160 * dpiRatio));
+            int minPreviewsH = Math.Max(140, (int)Math.Round(190 * dpiRatio));
+            int minBoxH = Math.Max(48, (int)Math.Round(80 * dpiRatio));
+
+            _isApplyingResponsiveLayout = true;
+            try
+            {
+                pnlObjectTypes.SuspendLayout();
+                int availableHeight = pnlObjectTypes.ClientSize.Height - dgvObjectTypes.Top - gridToPreviewsGap - previewsBottomMargin;
+                (int gridHeight, int previewsHeight) = ResponsiveLayoutHelper.ComputeResponsiveSplit(
+                    availableHeight,
+                    baseGridH,
+                    basePreviewsH,
+                    minGridH,
+                    minPreviewsH);
+
+                dgvObjectTypes.Height = gridHeight;
+                grpExamplePreviews.Top = dgvObjectTypes.Bottom + gridToPreviewsGap;
+                grpExamplePreviews.Height = previewsHeight;
+
+                grpExamplePreviews.SuspendLayout();
+                int previewRight = Math.Max(colMargin + 30, grpExamplePreviews.ClientSize.Width - colMargin);
+                (int Left, int Width)[] cols = ResponsiveLayoutHelper.ComputeHorizontalColumns(colMargin, previewRight, colGap, 3);
+                int boxHeight = Math.Max(minBoxH, grpExamplePreviews.ClientSize.Height - boxTop - boxBottomMargin);
+
+                lblPreviewSmallBoxTitle.Location = new Point(cols[0].Left, titleTop);
+                picPreviewSmallBox.Bounds = new Rectangle(cols[0].Left, boxTop, cols[0].Width, boxHeight);
+
+                lblPreviewMagnetTitle.Location = new Point(cols[1].Left, titleTop);
+                picPreviewMagnet.Bounds = new Rectangle(cols[1].Left, boxTop, cols[1].Width, boxHeight);
+
+                lblPreviewFlaskTitle.Location = new Point(cols[2].Left, titleTop);
+                picPreviewFlask.Bounds = new Rectangle(cols[2].Left, boxTop, cols[2].Width, boxHeight);
+            }
+            finally
+            {
+                grpExamplePreviews.ResumeLayout(performLayout: false);
+                pnlObjectTypes.ResumeLayout(performLayout: false);
+                _isApplyingResponsiveLayout = false;
             }
         }
 
@@ -359,6 +466,11 @@ namespace OpenBISLabelStudio
             pnlConnection.Visible = step == SetupWizardStep.Connection;
             pnlObjectTypes.Visible = step == SetupWizardStep.ObjectTypes;
             pnlPrinters.Visible = step == SetupWizardStep.Printers;
+            if (step == SetupWizardStep.ObjectTypes)
+            {
+                pnlObjectTypes.PerformLayout();
+                UpdateResponsiveLayout();
+            }
 
             if (Mode == SetupDialogMode.Wizard)
             {
