@@ -34,11 +34,16 @@ namespace OpenBISLabelStudio
         private bool _isPopulatingPrinters;
         private bool _isPopulatingTypes;
         private bool _isUpdatingSortControls;
+        private bool _isSyncingEvapTemp;
+        private string _lastCommittedEvapTemp = "";
+        private string _lastCommittedMagnetFreeText = "";
+        private string _lastCommittedFlaskFreeText = "";
         private IReadOnlyList<SampleSummaryDto> _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
         private SampleSortField _currentSortField = SampleSortField.ModificationDate;
         private SampleSortDirection _currentSortDirection = SampleSortDirection.Descending;
         private readonly Dictionary<LabelTemplateType, long> _slotRenderVersions = new Dictionary<LabelTemplateType, long>();
         private readonly Dictionary<LabelTemplateType, CancellationTokenSource> _slotPreviewCts = new Dictionary<LabelTemplateType, CancellationTokenSource>();
+        private CancellationTokenSource? _moleculeTempRenderCts;
         private CancellationTokenSource? _typeRefreshCts;
         private CancellationTokenSource? _typeSelectionCts;
         private CancellationTokenSource? _sampleLoadPreviewCts;
@@ -68,6 +73,8 @@ namespace OpenBISLabelStudio
 
             InitializeComponent();
             InitializeSortControls();
+            RegisterClickOutsideFocusClear(this);
+            UpdateTemplateInputControlsState();
             AppIconProvider.AttachWindowIcon(this, ref _windowIcon);
         }
 
@@ -322,7 +329,7 @@ namespace OpenBISLabelStudio
             _credentialFingerprint = startup.CredentialFingerprint ?? "";
             PopulateInstalledPrinters(startup.Printers);
             PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode);
-            UpdateFreeTextControlsState();
+            UpdateTemplateInputControlsState();
 
             if (!string.IsNullOrWhiteSpace(startup.NoticeMessage))
             {
@@ -534,7 +541,7 @@ namespace OpenBISLabelStudio
                 if (refresh.TypesUpdated)
                 {
                     PopulateOpenBisTypeComboBox(refresh.ConfiguredTypes, _currentSelectedTypeCode);
-                    UpdateFreeTextControlsState();
+                    UpdateTemplateInputControlsState();
                 }
             }
             catch (OperationCanceledException)
@@ -548,25 +555,36 @@ namespace OpenBISLabelStudio
             }
         }
 
-        private void UpdateFreeTextControlsState()
+        private void UpdateTemplateInputControlsState()
         {
-            bool isMoleculeProfile = _activeProfile == LabelTemplateProfile.Molecule;
             bool hasSelection = !string.IsNullOrEmpty(_currentSelectedTypeCode);
+            bool showEvapTemp = hasSelection && _activeProfile == LabelTemplateProfile.Molecule;
+            bool showFreeText = hasSelection && _activeProfile == LabelTemplateProfile.Generic;
 
-            // FreeText is applicable only for Generic / Free-text template profile
-            magnetFreeTextBox.Enabled = hasSelection && !isMoleculeProfile;
-            flaskFreeTextBox.Enabled = hasSelection && !isMoleculeProfile;
+            smallBoxEvapTempLabel.Visible = showEvapTemp;
+            smallBoxEvapTempLabel.Enabled = showEvapTemp;
+            smallBoxEvapTempBox.Visible = showEvapTemp;
+            smallBoxEvapTempBox.Enabled = showEvapTemp;
 
-            if (isMoleculeProfile)
-            {
-                magnetFreeTextBox.PlaceholderText = "(N/A for Molecule templates)";
-                flaskFreeTextBox.PlaceholderText = "(N/A for Molecule templates)";
-            }
-            else
-            {
-                magnetFreeTextBox.PlaceholderText = "Free text placeholder";
-                flaskFreeTextBox.PlaceholderText = "Free text placeholder";
-            }
+            magnetEvapTempLabel.Visible = showEvapTemp;
+            magnetEvapTempLabel.Enabled = showEvapTemp;
+            magnetEvapTempBox.Visible = showEvapTemp;
+            magnetEvapTempBox.Enabled = showEvapTemp;
+
+            magnetFreeTextLabel.Visible = showFreeText;
+            magnetFreeTextLabel.Enabled = showFreeText;
+            magnetFreeTextBox.Visible = showFreeText;
+            magnetFreeTextBox.Enabled = showFreeText;
+
+            flaskFreeTextLabel.Visible = showFreeText;
+            flaskFreeTextLabel.Enabled = showFreeText;
+            flaskFreeTextBox.Visible = showFreeText;
+            flaskFreeTextBox.Enabled = showFreeText;
+
+            smallBoxEvapTempBox.PlaceholderText = showEvapTemp ? "e.g. 250°C" : "";
+            magnetEvapTempBox.PlaceholderText = showEvapTemp ? "e.g. 250°C" : "";
+            magnetFreeTextBox.PlaceholderText = showFreeText ? "Free text placeholder" : "";
+            flaskFreeTextBox.PlaceholderText = showFreeText ? "Free text placeholder" : "";
         }
 
         private async void openbisTypeComboBox_SelectedIndexChanged(object sender, EventArgs e)
@@ -594,7 +612,7 @@ namespace OpenBISLabelStudio
                 _loadedSampleLabel = "";
                 _backend.ClearActiveSample();
                 ClearAllPreviews();
-                UpdateFreeTextControlsState();
+                UpdateTemplateInputControlsState();
                 ClearLoadingFeedback();
                 return;
             }
@@ -620,7 +638,7 @@ namespace OpenBISLabelStudio
             _loadedTypeSamples = Array.Empty<SampleSummaryDto>();
             openbisObjectsComboBox.Items.Clear();
             ClearAllPreviews();
-            UpdateFreeTextControlsState();
+            UpdateTemplateInputControlsState();
 
             // Allow switching object types or opening Settings even while items for a previous selection load.
             SetSampleQueryControlsEnabled(false);
@@ -798,7 +816,21 @@ namespace OpenBISLabelStudio
                     ? _loadedSamplePermId
                     : $"{_loadedSampleName} ({_loadedSamplePermId})";
 
-                UpdateFreeTextControlsState();
+                UpdateTemplateInputControlsState();
+                if (_activeProfile == LabelTemplateProfile.Molecule)
+                {
+                    ApplyEvapTempBundleValues(
+                        bundle.EvaporationTemperature ?? "",
+                        bundle.EvaporationTemperatureRaw ?? "");
+                    _lastCommittedMagnetFreeText = "";
+                    _lastCommittedFlaskFreeText = "";
+                }
+                else
+                {
+                    ClearEvapTempControls();
+                    _lastCommittedMagnetFreeText = magnetFreeTextBox.Text ?? "";
+                    _lastCommittedFlaskFreeText = flaskFreeTextBox.Text ?? "";
+                }
 
                 // Automatically check all preview checkboxes for convenience
                 smallBoxLabelCheckBox.Checked = true;
@@ -896,47 +928,321 @@ namespace OpenBISLabelStudio
         }
 
         // =========================================================================
-        // DYNAMIC FREE TEXT COMMIT HANDLERS (ON LEAVE OR ENTER)
+        // DYNAMIC COMMIT HANDLERS (CLICK OUTSIDE OR ENTER)
         // =========================================================================
-        private void magnetFreeTextBox_Leave(object sender, EventArgs e)
+        private void RegisterClickOutsideFocusClear(Control root)
         {
-            if (_hasLoadedSample && _activeProfile == LabelTemplateProfile.Generic)
+            root.MouseDown += NonInputControl_MouseDown;
+            foreach (Control child in root.Controls)
             {
+                if (child is TextBoxBase)
+                {
+                    continue;
+                }
+
+                if (child is GroupBox or Label or PictureBox or ProgressBar)
+                {
+                    child.MouseDown += NonInputControl_MouseDown;
+                }
+
+                if (child.HasChildren)
+                {
+                    RegisterClickOutsideFocusClear(child);
+                }
+            }
+        }
+
+        private void NonInputControl_MouseDown(object? sender, MouseEventArgs e)
+        {
+            if (ActiveControl is TextBoxBase activeTextBox)
+            {
+                ActiveControl = null;
+                CommitTextBoxEditIfChanged(activeTextBox);
+            }
+        }
+
+        private void smallBoxEvapTempBox_TextChanged(object? sender, EventArgs e)
+        {
+            SyncEvapTempText(smallBoxEvapTempBox, magnetEvapTempBox);
+        }
+
+        private void magnetEvapTempBox_TextChanged(object? sender, EventArgs e)
+        {
+            SyncEvapTempText(magnetEvapTempBox, smallBoxEvapTempBox);
+        }
+
+        private void SyncEvapTempText(TextBox source, TextBox target)
+        {
+            if (_isSyncingEvapTemp || string.Equals(source.Text, target.Text, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _isSyncingEvapTemp = true;
+            try
+            {
+                target.Text = source.Text;
+            }
+            finally
+            {
+                _isSyncingEvapTemp = false;
+            }
+        }
+
+        private void smallBoxEvapTempBox_Leave(object? sender, EventArgs e)
+        {
+            CommitTextBoxEditIfChanged(smallBoxEvapTempBox);
+        }
+
+        private void smallBoxEvapTempBox_KeyDown(object? sender, KeyEventArgs e)
+        {
+            CommitOnEnterKey(sender, e);
+        }
+
+        private void magnetEvapTempBox_Leave(object? sender, EventArgs e)
+        {
+            CommitTextBoxEditIfChanged(magnetEvapTempBox);
+        }
+
+        private void magnetEvapTempBox_KeyDown(object? sender, KeyEventArgs e)
+        {
+            CommitOnEnterKey(sender, e);
+        }
+
+        private void magnetFreeTextBox_Leave(object? sender, EventArgs e)
+        {
+            CommitTextBoxEditIfChanged(magnetFreeTextBox);
+        }
+
+        private void magnetFreeTextBox_KeyDown(object? sender, KeyEventArgs e)
+        {
+            CommitOnEnterKey(sender, e);
+        }
+
+        private void flaskFreeTextBox_Leave(object? sender, EventArgs e)
+        {
+            CommitTextBoxEditIfChanged(flaskFreeTextBox);
+        }
+
+        private void flaskFreeTextBox_KeyDown(object? sender, KeyEventArgs e)
+        {
+            CommitOnEnterKey(sender, e);
+        }
+
+        private void CommitOnEnterKey(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Enter)
+            {
+                return;
+            }
+
+            e.SuppressKeyPress = true;
+            ActiveControl = null;
+            if (sender is TextBoxBase box)
+            {
+                CommitTextBoxEditIfChanged(box);
+            }
+        }
+
+        private void CommitTextBoxEditIfChanged(TextBoxBase textBox)
+        {
+            if (!_hasLoadedSample)
+            {
+                return;
+            }
+
+            if ((ReferenceEquals(textBox, smallBoxEvapTempBox) || ReferenceEquals(textBox, magnetEvapTempBox))
+                && _activeProfile == LabelTemplateProfile.Molecule)
+            {
+                string currentTemp = smallBoxEvapTempBox.Text ?? "";
+                if (string.Equals(currentTemp, _lastCommittedEvapTemp, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _lastCommittedEvapTemp = currentTemp;
+                _ = RenderMoleculeTemperaturePreviewsAsync(currentTemp);
+                return;
+            }
+
+            if (ReferenceEquals(textBox, magnetFreeTextBox) && _activeProfile == LabelTemplateProfile.Generic)
+            {
+                string currentFreeText = magnetFreeTextBox.Text ?? "";
+                if (string.Equals(currentFreeText, _lastCommittedMagnetFreeText, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _lastCommittedMagnetFreeText = currentFreeText;
                 _ = RenderSlotFreeTextPreviewAsync(
                     magnetLabelPreview,
                     LabelTemplateType.Magnet12mm,
-                    magnetFreeTextBox.Text);
+                    currentFreeText);
+                return;
             }
-        }
 
-        private void magnetFreeTextBox_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
+            if (ReferenceEquals(textBox, flaskFreeTextBox) && _activeProfile == LabelTemplateProfile.Generic)
             {
-                e.SuppressKeyPress = true;
-                ActiveControl = null; // Shift focus to trigger commit
-                magnetFreeTextBox_Leave(sender, EventArgs.Empty);
-            }
-        }
+                string currentFreeText = flaskFreeTextBox.Text ?? "";
+                if (string.Equals(currentFreeText, _lastCommittedFlaskFreeText, StringComparison.Ordinal))
+                {
+                    return;
+                }
 
-        private void flaskFreeTextBox_Leave(object sender, EventArgs e)
-        {
-            if (_hasLoadedSample && _activeProfile == LabelTemplateProfile.Generic)
-            {
+                _lastCommittedFlaskFreeText = currentFreeText;
                 _ = RenderSlotFreeTextPreviewAsync(
                     flaskLabelPreview,
                     LabelTemplateType.Flask24mm,
-                    flaskFreeTextBox.Text);
+                    currentFreeText);
             }
         }
 
-        private void flaskFreeTextBox_KeyDown(object sender, KeyEventArgs e)
+        private void ApplyEvapTempBundleValues(string displayedTemp, string rawTemp)
         {
-            if (e.KeyCode == Keys.Enter)
+            _isSyncingEvapTemp = true;
+            try
             {
-                e.SuppressKeyPress = true;
-                ActiveControl = null; // Shift focus to trigger commit
-                flaskFreeTextBox_Leave(sender, EventArgs.Empty);
+                smallBoxEvapTempBox.Text = displayedTemp;
+                magnetEvapTempBox.Text = displayedTemp;
+            }
+            finally
+            {
+                _isSyncingEvapTemp = false;
+            }
+
+            _lastCommittedEvapTemp = displayedTemp;
+
+            string tooltip;
+            if (string.IsNullOrWhiteSpace(rawTemp))
+            {
+                tooltip = "Overrides the printed evaporation temperature locally (does not modify openBIS).";
+            }
+            else if (!string.Equals(rawTemp, displayedTemp, StringComparison.Ordinal))
+            {
+                tooltip = $"openBIS value: {rawTemp} (trimmed to 10 chars; edit here to override printout)";
+            }
+            else
+            {
+                tooltip = $"openBIS value: {rawTemp} (edit here to override printout)";
+            }
+
+            _statusToolTip.SetToolTip(smallBoxEvapTempBox, tooltip);
+            _statusToolTip.SetToolTip(magnetEvapTempBox, tooltip);
+        }
+
+        private void ClearEvapTempControls()
+        {
+            _isSyncingEvapTemp = true;
+            try
+            {
+                smallBoxEvapTempBox.Text = "";
+                magnetEvapTempBox.Text = "";
+            }
+            finally
+            {
+                _isSyncingEvapTemp = false;
+            }
+
+            _lastCommittedEvapTemp = "";
+            _statusToolTip.SetToolTip(smallBoxEvapTempBox, null);
+            _statusToolTip.SetToolTip(magnetEvapTempBox, null);
+        }
+
+        private async Task RenderMoleculeTemperaturePreviewsAsync(string evaporationTemperature)
+        {
+            if (IsDisposed || Disposing)
+            {
+                return;
+            }
+
+            long boxVersion = NextSlotRenderVersion(LabelTemplateType.SmallBox12mm);
+            long magnetVersion = NextSlotRenderVersion(LabelTemplateType.Magnet12mm);
+            CancelSlotPreviewRender(LabelTemplateType.SmallBox12mm);
+            CancelSlotPreviewRender(LabelTemplateType.Magnet12mm);
+            CancelMoleculeTemperatureRender();
+
+            var cts = new CancellationTokenSource();
+            _moleculeTempRenderCts = cts;
+            CancellationToken cancellationToken = cts.Token;
+
+            SetPictureBoxImage(
+                smallBoxLabelPreview,
+                DecodeSlotPreview(
+                    LabelTemplateType.SmallBox12mm,
+                    LabelTemplateProfile.Molecule,
+                    _backend.GetLoadingPreviewPng(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Molecule)));
+            SetPictureBoxImage(
+                magnetLabelPreview,
+                DecodeSlotPreview(
+                    LabelTemplateType.Magnet12mm,
+                    LabelTemplateProfile.Molecule,
+                    _backend.GetLoadingPreviewPng(LabelTemplateType.Magnet12mm, LabelTemplateProfile.Molecule)));
+
+            try
+            {
+                IReadOnlyDictionary<LabelTemplateType, byte[]> previews =
+                    await _backend.RenderMoleculeEvaporationTemperatureAsync(evaporationTemperature, cancellationToken);
+
+                if (IsDisposed || Disposing || cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                if (IsCurrentSlotVersion(LabelTemplateType.SmallBox12mm, boxVersion)
+                    && previews.TryGetValue(LabelTemplateType.SmallBox12mm, out byte[]? boxPng))
+                {
+                    SetPictureBoxImage(
+                        smallBoxLabelPreview,
+                        DecodeSlotPreview(LabelTemplateType.SmallBox12mm, LabelTemplateProfile.Molecule, boxPng));
+                }
+
+                if (IsCurrentSlotVersion(LabelTemplateType.Magnet12mm, magnetVersion)
+                    && previews.TryGetValue(LabelTemplateType.Magnet12mm, out byte[]? magnetPng))
+                {
+                    SetPictureBoxImage(
+                        magnetLabelPreview,
+                        DecodeSlotPreview(LabelTemplateType.Magnet12mm, LabelTemplateProfile.Molecule, magnetPng));
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Ignored when a newer render or ClearAllPreviews supersedes this request.
+            }
+            catch (Exception ex)
+            {
+                if (!IsDisposed && !Disposing)
+                {
+                    if (IsCurrentSlotVersion(LabelTemplateType.SmallBox12mm, boxVersion))
+                    {
+                        SetPictureBoxImage(
+                            smallBoxLabelPreview,
+                            DecodeSlotPreview(
+                                LabelTemplateType.SmallBox12mm,
+                                LabelTemplateProfile.Molecule,
+                                _backend.GetFallbackPreviewPng(
+                                    LabelTemplateType.SmallBox12mm,
+                                    LabelTemplateProfile.Molecule,
+                                    $"Preview unavailable: {ex.Message}")));
+                    }
+
+                    if (IsCurrentSlotVersion(LabelTemplateType.Magnet12mm, magnetVersion))
+                    {
+                        SetPictureBoxImage(
+                            magnetLabelPreview,
+                            DecodeSlotPreview(
+                                LabelTemplateType.Magnet12mm,
+                                LabelTemplateProfile.Molecule,
+                                _backend.GetFallbackPreviewPng(
+                                    LabelTemplateType.Magnet12mm,
+                                    LabelTemplateProfile.Molecule,
+                                    $"Preview unavailable: {ex.Message}")));
+                    }
+                }
+            }
+            finally
+            {
+                Interlocked.CompareExchange(ref _moleculeTempRenderCts, null, cts);
+                cts.Dispose();
             }
         }
 
@@ -1067,6 +1373,11 @@ namespace OpenBISLabelStudio
             return true;
         }
 
+        private bool CancelMoleculeTemperatureRender()
+        {
+            return CancelTokenSourceSafe(Interlocked.Exchange(ref _moleculeTempRenderCts, null));
+        }
+
         private void CancelSlotPreviewRender(LabelTemplateType slot)
         {
             CancellationTokenSource? existing;
@@ -1086,6 +1397,7 @@ namespace OpenBISLabelStudio
 
         private void CancelAllSlotPreviewRenders()
         {
+            CancelMoleculeTemperatureRender();
             foreach (LabelTemplateType slot in Enum.GetValues<LabelTemplateType>())
             {
                 NextSlotRenderVersion(slot);
@@ -1127,8 +1439,11 @@ namespace OpenBISLabelStudio
             _loadedSamplePermId = "";
             _loadedSampleLabel = "";
 
+            ClearEvapTempControls();
             magnetFreeTextBox.Text = "";
             flaskFreeTextBox.Text = "";
+            _lastCommittedMagnetFreeText = "";
+            _lastCommittedFlaskFreeText = "";
 
             smallBoxLabelCheckBox.Checked = false;
             magnetLabelCheckBox.Checked = false;
@@ -1204,6 +1519,9 @@ namespace OpenBISLabelStudio
             }
 
             var selections = new List<PrintSlotSelection>();
+            string? moleculeTempOverride = _activeProfile == LabelTemplateProfile.Molecule
+                ? smallBoxEvapTempBox.Text
+                : null;
 
             if (smallBoxLabelCheckBox.Checked)
             {
@@ -1211,7 +1529,8 @@ namespace OpenBISLabelStudio
                 {
                     Slot = LabelTemplateType.SmallBox12mm,
                     PrinterName = smallBoxPrinterComboBox.SelectedItem?.ToString() ?? _fallbackSmallBoxPrinter,
-                    FreeText = ""
+                    FreeText = "",
+                    EvaporationTemperature = moleculeTempOverride
                 });
             }
 
@@ -1221,7 +1540,8 @@ namespace OpenBISLabelStudio
                 {
                     Slot = LabelTemplateType.Magnet12mm,
                     PrinterName = magnetPrinterComboBox.SelectedItem?.ToString() ?? _fallbackMagnetPrinter,
-                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : ""
+                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? magnetFreeTextBox.Text : "",
+                    EvaporationTemperature = moleculeTempOverride
                 });
             }
 
@@ -1231,7 +1551,8 @@ namespace OpenBISLabelStudio
                 {
                     Slot = LabelTemplateType.Flask24mm,
                     PrinterName = flaskPrinterComboBox.SelectedItem?.ToString() ?? _fallbackFlaskPrinter,
-                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : ""
+                    FreeText = _activeProfile == LabelTemplateProfile.Generic ? flaskFreeTextBox.Text : "",
+                    EvaporationTemperature = moleculeTempOverride
                 });
             }
 
@@ -1367,13 +1688,13 @@ namespace OpenBISLabelStudio
                 openbisObjectsComboBox.Items.Clear();
                 _backend.ClearActiveSample();
                 ClearAllPreviews();
-                UpdateFreeTextControlsState();
+                UpdateTemplateInputControlsState();
             }
             else
             {
                 PopulateOpenBisTypeComboBox(startup.ConfiguredTypes, preferredTypeCode: previousTypeCode);
                 LabelTemplateProfile updatedProfile = _activeProfile;
-                UpdateFreeTextControlsState();
+                UpdateTemplateInputControlsState();
 
                 if (_hasLoadedSample
                     && updatedProfile != previousProfile
