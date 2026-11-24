@@ -4921,8 +4921,14 @@ namespace OpenBISLabelStudio.Tests
             }
 
             int maxHalfScreenWidth = (int)Math.Ceiling(960.0 * Math.Max(96, form.DeviceDpi) / 96.0);
+            AssertFalse(form.MaximizeBox, "Form1 should disable MaximizeBox so window stays within comfortable bounds");
+            AssertEqual(Color.White.ToArgb(), picBox.BackColor.ToArgb(), "smallBoxLabelPreview BackColor must be White");
+            AssertEqual(Color.White.ToArgb(), picMag.BackColor.ToArgb(), "magnetLabelPreview BackColor must be White");
+            AssertEqual(Color.White.ToArgb(), picFlask.BackColor.ToArgb(), "flaskLabelPreview BackColor must be White");
             AssertTrue(form.MinimumSize.Width > 0 && form.MinimumSize.Height > 0, "Form1 must enforce a non-zero MinimumSize");
             AssertTrue(form.MinimumSize.Width <= maxHalfScreenWidth, $"Form1 MinimumSize width ({form.MinimumSize.Width}) should allow half-screen snap (<= {maxHalfScreenWidth})");
+            AssertTrue(form.MaximumSize.Width > form.Width && form.MaximumSize.Height > form.Height,
+                $"Form1 must enforce a balanced MaximumSize ({form.MaximumSize}) larger than default ({form.Size})");
 
             AssertMainFormLayoutValid(
                 form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
@@ -4940,18 +4946,24 @@ namespace OpenBISLabelStudio.Tests
             int initialPicH = picBox.Height;
             int initialBtnTop = btnLoad.Top;
 
-            // Expand significantly (similar to 1080p maximized / large window)
-            form.ClientSize = new Size(initialSize.Width + 600, initialSize.Height + 390);
+            // Expand up to comfortable middle-ground cap (~1440 x 780 scaled)
+            form.Size = form.MaximumSize;
             Application.DoEvents();
+            AssertEqual(form.MaximumSize, form.Size, "Expanding to MaximumSize must reach capped dimensions cleanly");
 
-            AssertTrue(cmbTypes.Width > initialTypesW + 500, "openbisTypeComboBox must expand horizontally");
-            AssertTrue(cmbObjects.Width > initialObjectsW + 500, "openbisObjectsComboBox must expand horizontally");
-            AssertTrue(lblStatus.Width > initialStatusW + 500, "lblStatusNotice must expand horizontally");
-            AssertTrue(grpBox.Width > initialCardW + 150, "Label cards must expand horizontally");
-            AssertTrue(grpBox.Height > initialCardH + 300, "Label cards must expand vertically");
-            AssertTrue(picBox.Width > initialPicW + 150, "Preview PictureBox must expand horizontally");
-            AssertTrue(picBox.Height > initialPicH + 300, "Preview PictureBox must expand vertically");
-            AssertTrue(btnLoad.Top > initialBtnTop + 300, "Footer buttons must track window bottom");
+            AssertTrue(cmbTypes.Width > initialTypesW + 300, "openbisTypeComboBox must expand horizontally");
+            AssertTrue(cmbObjects.Width > initialObjectsW + 300, "openbisObjectsComboBox must expand horizontally");
+            AssertTrue(lblStatus.Width > initialStatusW + 300, "lblStatusNotice must expand horizontally");
+            AssertTrue(grpBox.Width > initialCardW + 100, "Label cards must expand horizontally");
+            AssertTrue(grpBox.Height > initialCardH + 200, "Label cards must expand vertically");
+            AssertTrue(picBox.Width > initialPicW + 100, "Preview PictureBox must expand horizontally");
+            AssertTrue(picBox.Height > initialPicH + 200, "Preview PictureBox must expand vertically");
+            AssertTrue(btnLoad.Top > initialBtnTop + 200, "Footer buttons must track window bottom");
+
+            // Attempting to drag past MaximumSize clamps cleanly without stretching awkwardly
+            form.Size = new Size(3000, 2000);
+            Application.DoEvents();
+            AssertEqual(form.MaximumSize, form.Size, "Expanding beyond MaximumSize must clamp cleanly to MaximumSize");
 
             AssertMainFormLayoutValid(
                 form, lblType, cmbTypes, cmbObjects, lblSortBy, cmbSortBy, btnSortDir, lblStatus, prgLoading,
@@ -5030,6 +5042,10 @@ namespace OpenBISLabelStudio.Tests
             var picFlask = FindControl<PictureBox>(form, "picPreviewFlask");
             var lblConnStatus = FindControl<Label>(form, "lblConnectionStatus");
 
+            AssertFalse(form.MaximizeBox, "SetupSettingsForm should disable MaximizeBox so window stays within comfortable bounds");
+            AssertTrue(form.MinimumSize.Width > 0 && form.MinimumSize.Height > 0, "SetupSettingsForm must enforce MinimumSize");
+            AssertTrue(form.MaximumSize.Width > form.Width && form.MaximumSize.Height > form.Height,
+                $"SetupSettingsForm must enforce balanced MaximumSize ({form.MaximumSize}) larger than default ({form.Size})");
             AssertTrue((lblConnStatus.Anchor & AnchorStyles.Bottom) != 0, "lblConnectionStatus should anchor Bottom to grow vertically");
 
             int initialDgvH = dgv.Height;
@@ -5038,16 +5054,17 @@ namespace OpenBISLabelStudio.Tests
             int initialPicW = picSmall.Width;
             int initialPicH = picSmall.Height;
 
-            form.ClientSize = new Size(form.ClientSize.Width + 500, form.ClientSize.Height + 260);
+            form.Size = form.MaximumSize;
             Application.DoEvents();
+            AssertEqual(form.MaximumSize, form.Size, "Expanding Settings to MaximumSize must reach capped bounds cleanly");
 
             AssertTrue(dgv.Height > initialDgvH + 80, "Object types grid must grow vertically on resize");
-            AssertTrue(grpPreviews.Width > initialGrpW + 450, "Example previews GroupBox must expand horizontally");
+            AssertTrue(grpPreviews.Width > initialGrpW + 300, "Example previews GroupBox must expand horizontally");
             AssertTrue(grpPreviews.Height > initialGrpH + 60, "Example previews GroupBox must grow vertically on resize");
 
-            AssertTrue(picSmall.Width > initialPicW + 120, "SmallBox example preview must expand horizontally");
-            AssertTrue(picMag.Width > initialPicW + 120, "Magnet example preview must expand horizontally");
-            AssertTrue(picFlask.Width > initialPicW + 120, "Flask example preview must expand horizontally");
+            AssertTrue(picSmall.Width > initialPicW + 100, "SmallBox example preview must expand horizontally");
+            AssertTrue(picMag.Width > initialPicW + 100, "Magnet example preview must expand horizontally");
+            AssertTrue(picFlask.Width > initialPicW + 100, "Flask example preview must expand horizontally");
             AssertTrue(picSmall.Height > initialPicH + 60, "Example preview PictureBoxes must expand vertically");
 
             AssertTrue(Math.Abs(picSmall.Width - picMag.Width) <= 2 && Math.Abs(picMag.Width - picFlask.Width) <= 2,
@@ -5063,10 +5080,18 @@ namespace OpenBISLabelStudio.Tests
             AssertFalse(lblHint.Bounds.IntersectsWith(lblFlask.Bounds), "Hint overlaps Flask title");
             AssertFalse(dgv.Bounds.IntersectsWith(grpPreviews.Bounds), "ObjectTypes grid overlaps grpExamplePreviews");
 
+            // Attempting to grow past MaximumSize or shrink below MinimumSize must clamp cleanly
+            form.Size = new Size(3000, 2000);
+            Application.DoEvents();
+            AssertEqual(form.MaximumSize, form.Size, "Settings expanding past MaximumSize must clamp to MaximumSize");
+            form.Size = new Size(500, 400);
+            Application.DoEvents();
+            AssertEqual(form.MinimumSize, form.Size, "Settings shrinking below MinimumSize must clamp to MinimumSize");
+
             // Also verify resizing while on Connection tab still yields expanded previews when switching to ObjectTypes
             using var tabForm = new SetupSettingsForm(stub, SetupDialogMode.Settings, SetupWizardStep.Connection);
             ShowOffscreen(tabForm);
-            tabForm.Size = new Size(tabForm.Width + 420, tabForm.Height + 240);
+            tabForm.Size = tabForm.MaximumSize;
             Application.DoEvents();
             FindControl<Button>(tabForm, "btnTabObjectTypes").PerformClick();
             Application.DoEvents();

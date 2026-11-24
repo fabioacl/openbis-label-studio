@@ -66,6 +66,8 @@ namespace OpenBISLabelStudio
         private bool _hasLayoutBaseline;
         private bool _isApplyingResponsiveLayout;
         private int _initialDpi = 96;
+        private int _baseClientWidth = 940;
+        private int _baseClientHeight = 680;
         private int _baseGridHeight = 230;
         private int _basePreviewsHeight = 224;
         private int _baseGridToPreviewsGap = 10;
@@ -202,13 +204,18 @@ namespace OpenBISLabelStudio
 
         protected override void OnDpiChanged(DpiChangedEventArgs e)
         {
+            MinimumSize = Size.Empty;
+            MaximumSize = Size.Empty;
             base.OnDpiChanged(e);
+            ApplyWindowSizeConstraints();
             UpdateResponsiveLayout();
         }
 
         private void CaptureBaselineLayoutMetrics()
         {
             _initialDpi = Math.Max(96, DeviceDpi);
+            _baseClientWidth = Math.Max(1, ClientSize.Width);
+            _baseClientHeight = Math.Max(1, ClientSize.Height);
             _baseGridHeight = Math.Max(120, dgvObjectTypes.Height);
             _basePreviewsHeight = Math.Max(140, grpExamplePreviews.Height);
             _baseGridToPreviewsGap = Math.Max(4, grpExamplePreviews.Top - dgvObjectTypes.Bottom);
@@ -219,6 +226,30 @@ namespace OpenBISLabelStudio
             _basePreviewBoxTop = picPreviewSmallBox.Top;
             _basePreviewBoxBottomMargin = Math.Max(8, grpExamplePreviews.ClientSize.Height - picPreviewSmallBox.Bottom);
             _hasLayoutBaseline = true;
+            ApplyWindowSizeConstraints();
+        }
+
+        private void ApplyWindowSizeConstraints()
+        {
+            if (!_hasLayoutBaseline)
+            {
+                return;
+            }
+
+            (Size minClient, Size maxClient) = ResponsiveLayoutHelper.ComputeWindowClientBounds(
+                _baseClientWidth,
+                _baseClientHeight,
+                _initialDpi,
+                DeviceDpi,
+                designWidth: 940,
+                designHeight: 680,
+                minDesignWidth: 940,
+                minDesignHeight: 680,
+                maxDesignWidth: 1320,
+                maxDesignHeight: 900);
+
+            MinimumSize = SizeFromClientSize(minClient);
+            MaximumSize = SizeFromClientSize(maxClient);
         }
 
         private void UpdateResponsiveLayout()

@@ -101,8 +101,9 @@ namespace OpenBISLabelStudio
         protected override void OnDpiChanged(DpiChangedEventArgs e)
         {
             MinimumSize = Size.Empty;
+            MaximumSize = Size.Empty;
             base.OnDpiChanged(e);
-            ApplyMinimumWindowSize();
+            ApplyWindowSizeConstraints();
             UpdateResponsiveLayout();
         }
 
@@ -117,20 +118,30 @@ namespace OpenBISLabelStudio
             _baseButtonGap = Math.Max(4, btnPrintLabel.Left - loadPrintTemplates.Right);
             _baseMinCardHeight = Math.Max(120, (int)Math.Round(smallBoxLabelGroupBox.Height * (296.0 / 326.0)));
             _hasLayoutBaseline = true;
-            ApplyMinimumWindowSize();
+            ApplyWindowSizeConstraints();
         }
 
-        private void ApplyMinimumWindowSize()
+        private void ApplyWindowSizeConstraints()
         {
             if (!_hasLayoutBaseline)
             {
                 return;
             }
 
-            double dpiRatio = (double)Math.Max(96, DeviceDpi) / _initialDpi;
-            int minClientW = (int)Math.Round(_baseClientWidth * (900.0 / 1080.0) * dpiRatio);
-            int minClientH = (int)Math.Round(_baseClientHeight * (500.0 / 530.0) * dpiRatio);
-            MinimumSize = SizeFromClientSize(new Size(minClientW, minClientH));
+            (Size minClient, Size maxClient) = ResponsiveLayoutHelper.ComputeWindowClientBounds(
+                _baseClientWidth,
+                _baseClientHeight,
+                _initialDpi,
+                DeviceDpi,
+                designWidth: 1080,
+                designHeight: 530,
+                minDesignWidth: 900,
+                minDesignHeight: 500,
+                maxDesignWidth: 1440,
+                maxDesignHeight: 780);
+
+            MinimumSize = SizeFromClientSize(minClient);
+            MaximumSize = SizeFromClientSize(maxClient);
         }
 
         private void UpdateResponsiveLayout()

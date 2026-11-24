@@ -274,6 +274,7 @@ namespace OpenBISLabelStudio
             // smallBoxLabelPreview
             // 
             smallBoxLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            smallBoxLabelPreview.BackColor = Color.White;
             smallBoxLabelPreview.BorderStyle = BorderStyle.FixedSingle;
             smallBoxLabelPreview.Location = new Point(15, 40);
             smallBoxLabelPreview.Name = "smallBoxLabelPreview";
@@ -374,6 +375,7 @@ namespace OpenBISLabelStudio
             // magnetLabelPreview
             // 
             magnetLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            magnetLabelPreview.BackColor = Color.White;
             magnetLabelPreview.BorderStyle = BorderStyle.FixedSingle;
             magnetLabelPreview.Location = new Point(15, 40);
             magnetLabelPreview.Name = "magnetLabelPreview";
@@ -451,6 +453,7 @@ namespace OpenBISLabelStudio
             // flaskLabelPreview
             // 
             flaskLabelPreview.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            flaskLabelPreview.BackColor = Color.White;
             flaskLabelPreview.BorderStyle = BorderStyle.FixedSingle;
             flaskLabelPreview.Location = new Point(15, 40);
             flaskLabelPreview.Name = "flaskLabelPreview";
@@ -480,6 +483,7 @@ namespace OpenBISLabelStudio
             Controls.Add(openbisTypeComboBox);
             Controls.Add(openbisTypeLabel);
             Font = new Font("Segoe UI", 11F, FontStyle.Regular, GraphicsUnit.Point);
+            MaximizeBox = false;
             Name = "Form1";
             Text = "openBIS Label Studio";
             Load += Form1_Load;
